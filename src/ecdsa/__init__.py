@@ -45,6 +45,7 @@ from .ecdh import (
 )
 from .der import UnexpectedDER
 from . import _version
+from . import recoverable
 
 # This code comes from http://github.com/tlsfuzzer/python-ecdsa
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
     "ellipticcurve",
     "keys",
     "numbertheory",
+    "recoverable",
     "test_pyecdsa",
     "util",
     "six",

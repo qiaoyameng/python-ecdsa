@@ -18,7 +18,13 @@ import math
 import binascii
 import sys
 from hashlib import sha256
-from six import PY2, int2byte, next
+from six import (
+    PY2,
+    int2byte,
+    next,
+    indexbytes,
+    integer_types,
+)
 from . import der
 from ._compat import normalise_bytes
 
@@ -277,6 +283,66 @@ def sigencode_string(r, s, order):
     # fixed, so just use simple concatenation
     r_str, s_str = sigencode_strings(r, s, order)
     return r_str + s_str
+
+
+def sigencode_string_recoverable(r, s, recovery_id, order):
+    """
+    Encode a recoverable ECDSA signature to its compact raw format.
+
+    The signature is two fixed-length, big-endian integers followed by one
+    byte containing the recovery ID.
+    """
+    if (
+        not isinstance(recovery_id, integer_types)
+        or isinstance(recovery_id, bool)
+        or recovery_id < 0
+        or recovery_id > 3
+    ):
+        raise MalformedSignature("Recovery ID must be an integer from 0 to 3")
+    if (
+        not isinstance(r, integer_types)
+        or isinstance(r, bool)
+        or not isinstance(s, integer_types)
+        or isinstance(s, bool)
+        or r < 1
+        or r >= order
+        or s < 1
+        or s >= order
+    ):
+        raise MalformedSignature(
+            "r and s must be in the range 1 to order - 1"
+        )
+    return sigencode_string(r, s, order) + int2byte(recovery_id)
+
+
+def sigdecode_string_recoverable(signature, order):
+    """
+    Decode a compact recoverable ECDSA signature.
+
+    Returns ``r``, ``s``, and the recovery ID.
+    """
+    signature = normalise_bytes(signature)
+    length = orderlen(order)
+    expected_length = 2 * length + 1
+    if len(signature) != expected_length:
+        raise MalformedSignature(
+            "Invalid length of recoverable signature, expected {0} bytes "
+            "long, provided string is {1} bytes long".format(
+                expected_length, len(signature)
+            )
+        )
+
+    r = string_to_number_fixedlen(signature[:length], order)
+    s = string_to_number_fixedlen(signature[length:-1], order)
+    recovery_id = indexbytes(signature, -1)
+    if recovery_id > 3:
+        raise MalformedSignature("Recovery ID must be between 0 and 3")
+    encoded = sigencode_string_recoverable(r, s, recovery_id, order)
+    if encoded != signature:
+        raise MalformedSignature(
+            "r and s must be in the range 1 to order - 1"
+        )
+    return r, s, recovery_id
 
 
 def sigencode_der(r, s, order):

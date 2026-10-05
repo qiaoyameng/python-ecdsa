@@ -65,7 +65,7 @@ modified as part of the python-ecdsa package.
 """
 
 import warnings
-from six import int2byte
+from six import int2byte, integer_types
 from . import ellipticcurve
 from . import numbertheory
 from .util import bit_length
@@ -77,6 +77,10 @@ class RSZeroError(RuntimeError):
 
 
 class InvalidPointError(RuntimeError):
+    pass
+
+
+class InvalidRecoveryIdError(ValueError):
     pass
 
 
@@ -127,6 +131,73 @@ class Signature(object):
         Pk2 = Public_key(generator, Q2)
 
         return [Pk1, Pk2]
+
+    def recover_public_key(self, hash, generator, recovery_id):
+        """
+        Return the public key selected by a compact-signature recovery ID.
+
+        Recovery IDs 0 and 1 use ``r`` as the x-coordinate of the nonce
+        public key; IDs 2 and 3 use ``r + n``. The least significant bit
+        selects the parity of its y-coordinate.
+        """
+        curve = generator.curve()
+        n = generator.order()
+        p = curve.p()
+        r = self.r
+        s = self.s
+
+        if not isinstance(recovery_id, integer_types) or isinstance(
+            recovery_id, bool
+        ):
+            raise InvalidRecoveryIdError(
+                "Recovery ID must be an integer between 0 and 3."
+            )
+        if r < 1 or r >= n or s < 1 or s >= n:
+            raise InvalidRecoveryIdError(
+                "r and s must be in the range 1 to order - 1."
+            )
+        if recovery_id < 0 or recovery_id > 3:
+            raise InvalidRecoveryIdError(
+                "Recovery ID must be between 0 and 3."
+            )
+
+        x = r + (recovery_id // 2) * n
+        if x >= p:
+            raise InvalidRecoveryIdError(
+                "Recovery ID selects an x-coordinate outside the field."
+            )
+
+        alpha = (pow(x, 3, p) + curve.a() * x + curve.b()) % p
+        try:
+            beta = numbertheory.square_root_mod_prime(alpha, p)
+        except numbertheory.SquareRootError:
+            raise InvalidRecoveryIdError(
+                "Recovery ID does not select a valid curve point."
+            )
+        y_parity = recovery_id % 2
+        y = beta if beta % 2 == y_parity else p - beta
+        if y % 2 != y_parity:
+            raise InvalidRecoveryIdError(
+                "Recovery ID selects a point y-coordinate with the wrong "
+                "parity."
+            )
+
+        R = ellipticcurve.PointJacobi(curve, x, y, 1, n)
+        if (
+            curve.cofactor() != 1
+            and n * R != ellipticcurve.INFINITY
+        ):
+            raise InvalidRecoveryIdError(
+                "Recovery ID selects a point with an invalid order."
+            )
+        Q = numbertheory.inverse_mod(r, n) * (
+            s * R + (-hash % n) * generator
+        )
+        if Q == ellipticcurve.INFINITY:
+            raise InvalidRecoveryIdError(
+                "Recovery ID selects the point at infinity as public key."
+            )
+        return Public_key(generator, Q)
 
 
 class Public_key(object):
@@ -246,6 +317,13 @@ class Private_key(object):
         random value k is in order.
         """
 
+        signature, recovery_id = self.sign_with_recovery(
+            hash, random_k, low_s=False
+        )
+        return signature
+
+    def sign_with_recovery(self, hash, random_k, low_s=True):
+        """Sign hash and return the signature and recovery ID."""
         G = self.public_key.generator
         n = G.order()
         k = random_k % n
@@ -261,13 +339,17 @@ class Private_key(object):
         r = p1.x() % n
         if r == 0:
             raise RSZeroError("amazingly unlucky random number r")
+        recovery_id = (2 if p1.x() >= n else 0) | (p1.y() % 2)
         s = (
             numbertheory.inverse_mod(k, n)
             * (hash + (self.secret_multiplier * r) % n)
         ) % n
         if s == 0:
             raise RSZeroError("amazingly unlucky random number s")
-        return Signature(r, s)
+        if low_s and s > n // 2:
+            s = n - s
+            recovery_id ^= 1
+        return Signature(r, s), recovery_id
 
 
 def int_to_string(x):  # pragma: no cover

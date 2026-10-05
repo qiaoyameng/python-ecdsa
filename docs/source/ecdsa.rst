@@ -21,5 +21,6 @@ Submodules
    ecdsa.errors
    ecdsa.keys
    ecdsa.numbertheory
+   ecdsa.recoverable
    ecdsa.rfc6979
    ecdsa.util

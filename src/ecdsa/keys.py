@@ -521,6 +521,49 @@ class VerifyingKey(object):
         ]
         return verifying_keys
 
+    @classmethod
+    def from_recoverable_signature_digest(
+        cls,
+        signature,
+        digest,
+        curve,
+        hashfunc=sha1,
+        allow_truncate=False,
+    ):
+        """
+        Recover the single public key selected by a compact recoverable
+        signature and verify that key against the signature.
+        """
+        from .recoverable import recover_public_key
+
+        return recover_public_key(
+            signature,
+            digest,
+            curve,
+            hashfunc=hashfunc,
+            allow_truncate=allow_truncate,
+        )
+
+    @classmethod
+    def from_recoverable_signature(
+        cls,
+        signature,
+        data,
+        curve,
+        hashfunc=sha1,
+        allow_truncate=True,
+    ):
+        """Recover and verify the public key from a compact signature."""
+        from .recoverable import recover_public_key_from_data
+
+        return recover_public_key_from_data(
+            signature,
+            data,
+            curve,
+            hashfunc=hashfunc,
+            allow_truncate=allow_truncate,
+        )
+
     def to_string(self, encoding="raw"):
         """
         Convert the public key to a byte string.
@@ -1629,3 +1672,51 @@ class SigningKey(object):
         assert 1 <= _k < order
         sig = self.privkey.sign(number, _k)
         return sig.r, sig.s
+
+    def sign_recoverable_digest(
+        self,
+        digest,
+        entropy=None,
+        k=None,
+        allow_truncate=False,
+        low_s=True,
+    ):
+        """
+        Create a compact recoverable signature over a raw digest.
+
+        The result is the fixed-length raw encoding of ``r`` and ``s``
+        followed by one recovery-ID byte. When ``low_s`` is enabled, both
+        ``s`` and the parity bit of the recovery ID are adjusted together.
+        """
+        from .recoverable import sign_recoverable_digest
+
+        return sign_recoverable_digest(
+            self,
+            digest,
+            entropy=entropy,
+            k=k,
+            allow_truncate=allow_truncate,
+            low_s=low_s,
+        )
+
+    def sign_recoverable(
+        self,
+        data,
+        entropy=None,
+        hashfunc=None,
+        k=None,
+        allow_truncate=True,
+        low_s=True,
+    ):
+        """Create a compact recoverable signature over data."""
+        from .recoverable import sign_recoverable
+
+        return sign_recoverable(
+            self,
+            data,
+            entropy=entropy,
+            hashfunc=hashfunc or self.default_hashfunc,
+            k=k,
+            allow_truncate=allow_truncate,
+            low_s=low_s,
+        )
