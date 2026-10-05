@@ -44,6 +44,15 @@ from .ecdh import (
     InvalidSharedSecretError,
 )
 from .der import UnexpectedDER
+from . import schnorr
+from .schnorr import (
+    SchnorrError,
+    InvalidPrivateKeyError,
+    InvalidPublicKeyError,
+    InvalidSignatureError,
+    SchnorrSigningKey,
+    SchnorrPublicKey,
+)
 from . import _version
 
 # This code comes from http://github.com/tlsfuzzer/python-ecdsa
@@ -57,6 +66,7 @@ __all__ = [
     "test_pyecdsa",
     "util",
     "six",
+    "schnorr",
 ]
 
 _hush_pyflakes = [
@@ -66,6 +76,10 @@ _hush_pyflakes = [
     BadDigestError,
     MalformedPointError,
     UnexpectedDER,
+    SchnorrError,
+    InvalidPrivateKeyError,
+    InvalidPublicKeyError,
+    InvalidSignatureError,
     InvalidCurveError,
     NoKeyError,
     InvalidSharedSecretError,

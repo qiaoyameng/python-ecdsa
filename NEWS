@@ -1,3 +1,13 @@
+* Unreleased
+
+New features:
+* Add a ``ecdsa.schnorr`` module implementing BIP 340 Schnorr signatures
+  over secp256k1, with x-only public keys, tagged hashes, auxiliary
+  randomness and even-y parity normalisation. The interface is separate
+  from ECDSA so a 64-byte Schnorr signature is never interpreted as an
+  ECDSA one. Messages are required to be exactly 32 bytes (they are not
+  pre-hashed by the library).
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:

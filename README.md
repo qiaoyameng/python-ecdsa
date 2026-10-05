@@ -639,3 +639,40 @@ with open("remote_public_key.pem") as e:
 ecdh.load_received_public_key_pem(remote_public_key)
 secret = ecdh.generate_sharedsecret_bytes()
 ```
+
+BIP 340 Schnorr signatures over `secp256k1`:
+
+The `ecdsa.schnorr` module implements
+[BIP 340](https://bips.xyz/340) Schnorr signatures. It is intentionally
+separate from the ECDSA API: a BIP 340 signature is always exactly 64 bytes
+(the `r` x-coordinate followed by `s`) and is never interpreted by the ECDSA
+signing/verifying methods, and vice versa.
+
+Per the specification, the message signed is a byte string of **exactly 32
+bytes**; this module does not hash arbitrary-length messages for you (that
+would change the protocol). Hash a longer message first according to your
+application (e.g. BIP 341's tagged hashes), then sign the 32-byte digest.
+
+```python
+from ecdsa import schnorr
+
+# sign with a 32-byte secret scalar and 32-byte auxiliary randomness
+sk_bytes = bytes.fromhex(
+    "0000000000000000000000000000000000000000000000000000000000000003"
+)
+msg = bytes(32)                 # the 32-byte message
+aux = bytes(32)                 # 32-byte auxiliary randomness
+
+signature = schnorr.sign(sk_bytes, msg, aux)     # 64 bytes
+assert schnorr.verify(
+    schnorr.SchnorrSigningKey.from_string(sk_bytes)
+        .get_verifying_key().to_string(),
+    signature,
+    msg,
+)
+```
+
+Omit `aux` (or pass `None`) to draw fresh auxiliary randomness with
+`os.urandom`; pass an explicit 32-byte `aux` for reproducible signatures.
+Public keys are x-only (32 bytes); validation rejects out-of-range `r`/`s`
+and points that are not on the curve.
