@@ -80,6 +80,94 @@ generator_ed448 = ellipticcurve.PointEdwards(
 )
 
 
+def _normalise_context(context):
+    """Return the context as bytes, verifying it's of valid length."""
+    if context is None:
+        return b""
+    if not isinstance(context, (bytes, bytearray)):
+        raise TypeError("context must be a bytes-like object")
+    context = bytes(context)
+    if len(context) > 255:
+        raise ValueError(
+            "context too long, maximum length is 255 bytes, got {0}".format(
+                len(context)
+            )
+        )
+    return context
+
+
+def _check_mode(mode, context, prehashed):
+    """Verify that the combination of mode, context and prehashed is valid."""
+    if mode not in ("pure", "ctx", "ph"):
+        raise ValueError(
+            "Unknown mode: {0!r}, must be 'pure', 'ctx' or 'ph'".format(mode)
+        )
+    if mode == "pure" and context:
+        raise ValueError(
+            "context is not supported in 'pure' mode, use 'ctx' mode"
+        )
+    if prehashed and mode != "ph":
+        raise ValueError("prehashed input is only supported in 'ph' mode")
+
+
+def _prehash_message(curve, data):
+    """Hash the message as specified for the ph mode in RFC 8032."""
+    if curve == curve_ed448:
+        # Ed448ph uses SHAKE256 with a 64 byte output for the prehash,
+        # not the 114 byte output used internally by the curve
+        return shake_256(data, 64)
+    return curve.hash_func(data)
+
+
+def _prehash_len(curve):
+    """Return the length of the prehash for the ph mode."""
+    if curve == curve_ed448:
+        return 64
+    return len(curve.hash_func(b""))
+
+
+def _dom2(curve, mode, context):
+    """Compute the dom2 (Ed25519) or dom4 (Ed448) prefix from RFC 8032."""
+    if curve == curve_ed448:
+        dom = bytearray(b"SigEd448")
+    elif mode == "pure":
+        # for PureEdDSA the dom2 is the empty string
+        return bytearray()
+    else:
+        dom = bytearray(b"SigEd25519 no Ed25519 collisions")
+    dom.append(1 if mode == "ph" else 0)
+    dom.append(len(context))
+    dom += context
+    return dom
+
+
+def _validate_parameters(curve, data, context, mode, prehashed):
+    """Verify that the combination of parameters is valid, return context."""
+    context = _normalise_context(context)
+    _check_mode(mode, context, prehashed)
+    if mode == "ph" and prehashed:
+        hash_len = _prehash_len(curve)
+        if len(data) != hash_len:
+            raise ValueError(
+                "Invalid length of the prehashed message, expected "
+                "{0} bytes, got {1}".format(hash_len, len(data))
+            )
+    return context
+
+
+def _process_message(curve, data, context, mode, prehashed):
+    """
+    Validate parameters and return the (dom, message) pair to sign/verify.
+    """
+    context = _validate_parameters(curve, data, context, mode, prehashed)
+    dom = _dom2(curve, mode, context)
+    if mode != "ph":
+        return dom, data
+    if prehashed:
+        return dom, data
+    return dom, _prehash_message(curve, data)
+
+
 class PublicKey(object):
     """Public key for the Edwards Digital Signature Algorithm."""
 
@@ -128,9 +216,32 @@ class PublicKey(object):
     def public_key(self):
         return self.__encoded
 
-    def verify(self, data, signature):
-        """Verify a Pure EdDSA signature over data."""
+    def verify(
+        self, data, signature, context=None, mode="pure", prehashed=False
+    ):
+        """
+        Verify an EdDSA signature over data.
+
+        :param data: the message the signature is over; in ``ph`` mode with
+            ``prehashed`` set to True it must be the output of the curve hash
+            function over the message
+        :type data: :term:`bytes-like object`
+        :param signature: the signature to verify
+        :type signature: :term:`bytes-like object`
+        :param context: the protocol specific context string, at most 255
+            bytes long; used only in ``ctx`` and ``ph`` modes
+        :type context: :term:`bytes-like object` or None
+        :param str mode: the EdDSA mode to use: "pure" for PureEdDSA
+            (Ed25519, Ed448), "ctx" for the contextualised variant
+            (Ed25519ctx) or "ph" for the prehashed variant (Ed25519ph,
+            Ed448ph)
+        :param bool prehashed: in ``ph`` mode, specifies that `data` is
+            already the hash of the message and must not be hashed again
+        """
         data = compat26_str(data)
+        dom, message = _process_message(
+            self.curve, data, context, mode, prehashed
+        )
         if len(signature) != 2 * self.baselen:
             raise ValueError(
                 "Invalid signature length, expected: {0} bytes".format(
@@ -144,12 +255,10 @@ class PublicKey(object):
         if S >= self.generator.order():
             raise ValueError("Invalid signature")
 
-        dom = bytearray()
-        if self.curve == curve_ed448:
-            dom = bytearray(b"SigEd448" + b"\x00\x00")
-
         k = bytes_to_int(
-            self.curve.hash_func(dom + R.to_bytes() + self.__encoded + data),
+            self.curve.hash_func(
+                dom + R.to_bytes() + self.__encoded + message
+            ),
             "little",
         )
 
@@ -230,21 +339,40 @@ class PrivateKey(object):
 
         return self.__public_key
 
-    def sign(self, data):
-        """Perform a Pure EdDSA signature over data."""
+    def sign(self, data, context=None, mode="pure", prehashed=False):
+        """
+        Perform an EdDSA signature over data.
+
+        :param data: the message to sign; in ``ph`` mode with ``prehashed``
+            set to True it must be the output of the curve hash function
+            over the message
+        :type data: :term:`bytes-like object`
+        :param context: the protocol specific context string, at most 255
+            bytes long; used only in ``ctx`` and ``ph`` modes
+        :type context: :term:`bytes-like object` or None
+        :param str mode: the EdDSA mode to use: "pure" for PureEdDSA
+            (Ed25519, Ed448), "ctx" for the contextualised variant
+            (Ed25519ctx) or "ph" for the prehashed variant (Ed25519ph,
+            Ed448ph)
+        :param bool prehashed: in ``ph`` mode, specifies that `data` is
+            already the hash of the message and must not be hashed again
+        """
         data = compat26_str(data)
+        dom, message = _process_message(
+            self.curve, data, context, mode, prehashed
+        )
         A = self.public_key().public_key()
 
         prefix = self.__h[self.baselen :]
 
-        dom = bytearray()
-        if self.curve == curve_ed448:
-            dom = bytearray(b"SigEd448" + b"\x00\x00")
-
-        r = bytes_to_int(self.curve.hash_func(dom + prefix + data), "little")
+        r = bytes_to_int(
+            self.curve.hash_func(dom + prefix + message), "little"
+        )
         R = (self.generator * r).to_bytes()
 
-        k = bytes_to_int(self.curve.hash_func(dom + R + A + data), "little")
+        k = bytes_to_int(
+            self.curve.hash_func(dom + R + A + message), "little"
+        )
         k %= self.generator.order()
 
         S = (r + k * self.__s) % self.generator.order()

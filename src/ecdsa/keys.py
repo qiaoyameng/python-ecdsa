@@ -633,6 +633,9 @@ class VerifyingKey(object):
         hashfunc=None,
         sigdecode=sigdecode_string,
         allow_truncate=True,
+        context=None,
+        mode="pure",
+        prehashed=False,
     ):
         """
         Verify a signature made over provided data.
@@ -664,6 +667,18 @@ class VerifyingKey(object):
             the end of the digest) will be truncated. Use it when verifying
             SHA-384 output using NIST256p or in similar situations. Defaults to
             True.
+        :param context: the protocol specific context string, at most 255
+            bytes long, used with the ``ctx`` and ``ph`` modes of EdDSA.
+            Only supported for EdDSA, raises ValueError with ECDSA.
+        :type context: :term:`bytes-like object` or None
+        :param str mode: the EdDSA mode to use: "pure" for PureEdDSA
+            (Ed25519, Ed448), "ctx" for the contextualised variant
+            (Ed25519ctx) or "ph" for the prehashed variant (Ed25519ph,
+            Ed448ph). Only supported for EdDSA, raises ValueError with
+            ECDSA.
+        :param bool prehashed: in ``ph`` mode, specifies that `data` is
+            already the hash of the message and must not be hashed again.
+            Only supported for EdDSA, raises ValueError with ECDSA.
 
         :raises BadSignatureError: if the signature is invalid or malformed
 
@@ -675,10 +690,25 @@ class VerifyingKey(object):
         data = normalise_bytes(data)
         if isinstance(self.curve.curve, CurveEdTw):
             signature = normalise_bytes(signature)
+            # reject invalid parameters before attempting verification
+            eddsa._validate_parameters(
+                self.curve.curve, data, context, mode, prehashed
+            )
             try:
-                return self.pubkey.verify(data, signature)
+                return self.pubkey.verify(
+                    data,
+                    signature,
+                    context=context,
+                    mode=mode,
+                    prehashed=prehashed,
+                )
             except (ValueError, MalformedPointError) as e:
                 raise BadSignatureError("Signature verification failed", e)
+        if context is not None or mode != "pure" or prehashed:
+            raise ValueError(
+                "context, mode and prehashed parameters are supported "
+                "only for EdDSA curves"
+            )
 
         hashfunc = hashfunc or self.default_hashfunc
         digest = hashfunc(data).digest()
@@ -1318,6 +1348,9 @@ class SigningKey(object):
         hashfunc=None,
         sigencode=sigencode_string,
         extra_entropy=b"",
+        context=None,
+        mode="pure",
+        prehashed=False,
     ):
         """
         Create signature over data.
@@ -1354,6 +1387,18 @@ class SigningKey(object):
             number generator used in the RFC6979 process. Entirely optional.
             Ignored with EdDSA.
         :type extra_entropy: :term:`bytes-like object`
+        :param context: the protocol specific context string, at most 255
+            bytes long, used with the ``ctx`` and ``ph`` modes of EdDSA.
+            Only supported for EdDSA, raises ValueError with ECDSA.
+        :type context: :term:`bytes-like object` or None
+        :param str mode: the EdDSA mode to use: "pure" for PureEdDSA
+            (Ed25519, Ed448), "ctx" for the contextualised variant
+            (Ed25519ctx) or "ph" for the prehashed variant (Ed25519ph,
+            Ed448ph). Only supported for EdDSA, raises ValueError with
+            ECDSA.
+        :param bool prehashed: in ``ph`` mode, specifies that `data` is
+            already the hash of the message and must not be hashed again.
+            Only supported for EdDSA, raises ValueError with ECDSA.
 
         :return: encoded signature over `data`
         :rtype: bytes or sigencode function dependent type
@@ -1362,7 +1407,14 @@ class SigningKey(object):
         data = normalise_bytes(data)
 
         if isinstance(self.curve.curve, CurveEdTw):
-            return self.privkey.sign(data)
+            return self.privkey.sign(
+                data, context=context, mode=mode, prehashed=prehashed
+            )
+        if context is not None or mode != "pure" or prehashed:
+            raise ValueError(
+                "context, mode and prehashed parameters are supported "
+                "only for EdDSA curves"
+            )
 
         extra_entropy = normalise_bytes(extra_entropy)
         digest = hashfunc(data).digest()
@@ -1462,6 +1514,9 @@ class SigningKey(object):
         sigencode=sigencode_string,
         k=None,
         allow_truncate=True,
+        context=None,
+        mode="pure",
+        prehashed=False,
     ):
         """
         Create signature over data.
@@ -1519,6 +1574,18 @@ class SigningKey(object):
             SHA-384 output using NIST256p or in similar situations. True by
             default.
             Ignored for EdDSA.
+        :param context: the protocol specific context string, at most 255
+            bytes long, used with the ``ctx`` and ``ph`` modes of EdDSA.
+            Only supported for EdDSA, raises ValueError with ECDSA.
+        :type context: :term:`bytes-like object` or None
+        :param str mode: the EdDSA mode to use: "pure" for PureEdDSA
+            (Ed25519, Ed448), "ctx" for the contextualised variant
+            (Ed25519ctx) or "ph" for the prehashed variant (Ed25519ph,
+            Ed448ph). Only supported for EdDSA, raises ValueError with
+            ECDSA.
+        :param bool prehashed: in ``ph`` mode, specifies that `data` is
+            already the hash of the message and must not be hashed again.
+            Only supported for EdDSA, raises ValueError with ECDSA.
 
         :raises RSZeroError: in the unlikely event when *r* parameter or
             *s* parameter of the created signature is equal 0, as that would
@@ -1532,7 +1599,14 @@ class SigningKey(object):
         hashfunc = hashfunc or self.default_hashfunc
         data = normalise_bytes(data)
         if isinstance(self.curve.curve, CurveEdTw):
-            return self.sign_deterministic(data)
+            return self.sign_deterministic(
+                data, context=context, mode=mode, prehashed=prehashed
+            )
+        if context is not None or mode != "pure" or prehashed:
+            raise ValueError(
+                "context, mode and prehashed parameters are supported "
+                "only for EdDSA curves"
+            )
         h = hashfunc(data).digest()
         return self.sign_digest(h, entropy, sigencode, k, allow_truncate)
 

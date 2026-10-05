@@ -21,6 +21,7 @@ from .eddsa import (
 from .ecdsa import generator_256, curve_256
 from .errors import MalformedPointError
 from ._compat import a2b_hex, compat26_str
+from ._sha3 import shake_256
 
 
 class TestA2B_Hex(unittest.TestCase):
@@ -1122,3 +1123,306 @@ def test_vectors(generator, private_key, public_key, message, signature):
     assert gen_sig == signature
 
     assert ver_key.verify(message, signature)
+
+
+# Test vectors for the contextualised (Ed25519ctx) and prehashed (Ed25519ph,
+# Ed448ph) modes. The first one is TEST 1 from RFC 8032, section 7.3, the
+# remaining ones were cross-verified against OpenSSL 3.x.
+# fmt: off
+TEST_VECTORS_CTX_PH = [
+    # RFC 8032, section 7.3, TEST 1
+    (
+        generator_ed25519,
+        "833fe62409237b9d62ec77587520911e"
+        "9a759cec1d19755b7da901b96dca3d42",
+        "ec172b93ad5e563bf4932c70e1245034"
+        "c35467ef2efd4d64ebf819683467e2bf",
+        "616263",
+        "",
+        "ph",
+        "98a70222f0b8121aa9d30f813d683f80"
+        "9e462b469c7ff87639499bb94e6dae41"
+        "31f85042463c2a355a2003d062adf5aa"
+        "a10b8c61e636062aaad11c2a26083406",
+    ),
+    # Ed25519ctx, empty message, empty context
+    (
+        generator_ed25519,
+        "9d61b19deffd5a60ba844af492ec2cc4"
+        "4449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a"
+        "0ee172f3daa62325af021a68f707511a",
+        "",
+        "",
+        "ctx",
+        "d210e902eaab7f4d503cba60ba9fd5a2"
+        "1ae7e9d4c569eb4d73ebceee7cd757e3"
+        "d77985bb05b09a3e517f486e2a0116e1"
+        "da875acc8de38719fd09061a81a1df02",
+    ),
+    # Ed25519ctx, message "abc", context "foo"
+    (
+        generator_ed25519,
+        "9d61b19deffd5a60ba844af492ec2cc4"
+        "4449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a"
+        "0ee172f3daa62325af021a68f707511a",
+        "616263",
+        "666f6f",
+        "ctx",
+        "1844a176f3e4f495ba413e22009e6870"
+        "6a08ec5bcf28d21bee93b2b84a5ecd85"
+        "d39e63c6c8355d2a4cc9929804c014ae"
+        "54f8fbbd130272b0f897e94f1f216002",
+    ),
+    # Ed25519ctx, maximal length (255 byte) context
+    (
+        generator_ed25519,
+        "9d61b19deffd5a60ba844af492ec2cc4"
+        "4449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a"
+        "0ee172f3daa62325af021a68f707511a",
+        "00000000000000000000000000000000"
+        "00000000000000000000000000000000",
+        "000102030405060708090a0b0c0d0e0f"
+        "101112131415161718191a1b1c1d1e1f"
+        "202122232425262728292a2b2c2d2e2f"
+        "303132333435363738393a3b3c3d3e3f"
+        "404142434445464748494a4b4c4d4e4f"
+        "505152535455565758595a5b5c5d5e5f"
+        "606162636465666768696a6b6c6d6e6f"
+        "707172737475767778797a7b7c7d7e7f"
+        "808182838485868788898a8b8c8d8e8f"
+        "909192939495969798999a9b9c9d9e9f"
+        "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+        "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+        "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfe",
+        "ctx",
+        "58b0c9c8a3a7ec0d6e67d0f216c1b10c"
+        "633de5a6e284592978474d482d24a50b"
+        "d8e8596776407620f4a9f5e11e672054"
+        "baab25c735860158a4bdd12955ebeb07",
+    ),
+    # Ed25519ph, message "abc", empty context
+    (
+        generator_ed25519,
+        "9d61b19deffd5a60ba844af492ec2cc4"
+        "4449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a"
+        "0ee172f3daa62325af021a68f707511a",
+        "616263",
+        "",
+        "ph",
+        "6bc830412d3097d74b5832af0ee35da8"
+        "7a87c31f6817b9f9869e4a99d9bde7c1"
+        "e4109c3387f3c749522bf3452ab65907"
+        "dbeed06b91df13eef527b9f3c005810e",
+    ),
+    # Ed25519ph, message "abc", context "ctx"
+    (
+        generator_ed25519,
+        "9d61b19deffd5a60ba844af492ec2cc4"
+        "4449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a"
+        "0ee172f3daa62325af021a68f707511a",
+        "616263",
+        "637478",
+        "ph",
+        "1eb111bcf0383b2b4a1203ada9f43c41"
+        "e8a430cd644e2d59bbfaf41da422b7b1"
+        "edb384cd40db54f5601da395abe9aed9"
+        "8484d95a6737cee7e39c39541ab35d05",
+    ),
+    # Ed448ph, message "abc", empty context
+    (
+        generator_ed448,
+        "6c82a562cb808d10d632be89c8513ebf"
+        "6c929f34ddfa8c9f63c9960ef6e348a3"
+        "528c8a3fcc2f044e39a3fc5b94492f8f"
+        "032e7549a20098f95b",
+        "5fd7449b59b461fd2ce787ec616ad46a"
+        "1da1342485a70e1f8a0ea75d80e96778"
+        "edf124769b46c7061bd6783df1e50f6c"
+        "d1fa1abeafe8256180",
+        "616263",
+        "",
+        "ph",
+        "62a8fc722f705b0436c3528e6fc75c93"
+        "47ceafe71ca6d70aaa9e62a9110ed2d0"
+        "1a5f353ba5b87961e6bc2a5789a58a3f"
+        "d9384c4106e49f0a80b8705befd1054e"
+        "e77231775340449868a7c4ef7d2e2531"
+        "5f63873702eb33ac8a552a37b3e4bb67"
+        "0dcc4d945476cf094b5d28e944beeab8"
+        "1200",
+    ),
+]
+# fmt: on
+
+
+def _prehash(generator, message):
+    if generator == generator_ed448:
+        return shake_256(message, 64)
+    return hashlib.sha512(compat26_str(message)).digest()
+
+
+@pytest.mark.parametrize(
+    "generator,private_key,public_key,message,context,mode,signature",
+    TEST_VECTORS_CTX_PH,
+)
+def test_vectors_ctx_ph(
+    generator, private_key, public_key, message, context, mode, signature
+):
+    private_key = a2b_hex(private_key)
+    public_key = a2b_hex(public_key)
+    message = a2b_hex(message)
+    context = a2b_hex(context)
+    signature = a2b_hex(signature)
+
+    sig_key = PrivateKey(generator, private_key)
+    ver_key = PublicKey(generator, public_key)
+
+    assert sig_key.public_key().public_key() == ver_key.public_key()
+
+    gen_sig = sig_key.sign(message, context=context, mode=mode)
+
+    assert gen_sig == signature
+
+    assert ver_key.verify(message, signature, context=context, mode=mode)
+
+
+@pytest.mark.parametrize(
+    "generator,private_key,public_key,message,context,mode,signature",
+    [vector for vector in TEST_VECTORS_CTX_PH if vector[5] == "ph"],
+)
+def test_vectors_ph_prehashed(
+    generator, private_key, public_key, message, context, mode, signature
+):
+    private_key = a2b_hex(private_key)
+    public_key = a2b_hex(public_key)
+    message = a2b_hex(message)
+    context = a2b_hex(context)
+    signature = a2b_hex(signature)
+
+    digest = _prehash(generator, message)
+
+    sig_key = PrivateKey(generator, private_key)
+    ver_key = PublicKey(generator, public_key)
+
+    gen_sig = sig_key.sign(digest, context=context, mode=mode, prehashed=True)
+
+    assert gen_sig == signature
+
+    assert ver_key.verify(
+        digest, signature, context=context, mode=mode, prehashed=True
+    )
+
+
+class TestEdDSACtxPhModes(object):
+    @staticmethod
+    def _key_pairs():
+        for generator, seed_len in (
+            (generator_ed25519, 32),
+            (generator_ed448, 57),
+        ):
+            sig_key = PrivateKey(generator, b"\x01" * seed_len)
+            yield sig_key, sig_key.public_key()
+
+    @pytest.mark.parametrize(
+        "sign_mode,sign_context,verify_mode,verify_context",
+        [
+            ("pure", b"", "ctx", b"foo"),
+            ("pure", b"", "ph", b""),
+            ("ctx", b"foo", "pure", b""),
+            ("ctx", b"foo", "ph", b"foo"),
+            ("ph", b"", "pure", b""),
+            ("ph", b"", "ctx", b"foo"),
+            # empty context in ctx mode is a different signature than pure
+            # mode for Ed25519 (dom2 is empty only in pure mode)
+            ("ctx", b"", "pure", b""),
+            ("pure", b"", "ctx", b""),
+        ],
+    )
+    def test_cross_mode_verification_fails(
+        self, sign_mode, sign_context, verify_mode, verify_context
+    ):
+        for sig_key, ver_key in self._key_pairs():
+            if (
+                sig_key.curve == curve_ed448
+                and sign_context == verify_context
+                and "ph" not in (sign_mode, verify_mode)
+            ):
+                # for Ed448 the dom4 prefix is always present, so pure mode
+                # and ctx mode with the same context are the same scheme
+                continue
+            signature = sig_key.sign(
+                b"message", context=sign_context, mode=sign_mode
+            )
+            with pytest.raises(ValueError):
+                ver_key.verify(
+                    b"message",
+                    signature,
+                    context=verify_context,
+                    mode=verify_mode,
+                )
+
+    def test_different_context_verification_fails(self):
+        for sig_key, ver_key in self._key_pairs():
+            signature = sig_key.sign(b"message", context=b"foo", mode="ctx")
+            with pytest.raises(ValueError):
+                ver_key.verify(
+                    b"message", signature, context=b"bar", mode="ctx"
+                )
+
+    def test_pure_mode_unchanged_by_default_parameters(self):
+        for sig_key, ver_key in self._key_pairs():
+            sig_default = sig_key.sign(b"message")
+            sig_pure = sig_key.sign(b"message", mode="pure")
+            assert sig_default == sig_pure
+            assert ver_key.verify(b"message", sig_pure)
+
+    def test_invalid_mode(self):
+        for sig_key, ver_key in self._key_pairs():
+            with pytest.raises(ValueError):
+                sig_key.sign(b"message", mode="invalid")
+            with pytest.raises(ValueError):
+                ver_key.verify(b"message", b"\x00" * 64, mode="invalid")
+
+    def test_context_in_pure_mode(self):
+        for sig_key, ver_key in self._key_pairs():
+            with pytest.raises(ValueError):
+                sig_key.sign(b"message", context=b"ctx", mode="pure")
+            with pytest.raises(ValueError):
+                ver_key.verify(
+                    b"message", b"\x00" * 64, context=b"ctx", mode="pure"
+                )
+
+    def test_context_too_long(self):
+        for sig_key, ver_key in self._key_pairs():
+            with pytest.raises(ValueError):
+                sig_key.sign(b"message", context=b"a" * 256, mode="ctx")
+            with pytest.raises(ValueError):
+                ver_key.verify(
+                    b"message", b"\x00" * 64, context=b"a" * 256, mode="ctx"
+                )
+
+    def test_context_not_bytes(self):
+        for sig_key, ver_key in self._key_pairs():
+            with pytest.raises(TypeError):
+                sig_key.sign(b"message", context="ctx", mode="ctx")
+
+    def test_prehashed_in_non_ph_mode(self):
+        for sig_key, ver_key in self._key_pairs():
+            with pytest.raises(ValueError):
+                sig_key.sign(b"message", prehashed=True)
+            with pytest.raises(ValueError):
+                sig_key.sign(b"message", mode="ctx", prehashed=True)
+
+    def test_prehashed_invalid_length(self):
+        for sig_key, ver_key in self._key_pairs():
+            with pytest.raises(ValueError):
+                sig_key.sign(b"\x00" * 32, mode="ph", prehashed=True)
+            with pytest.raises(ValueError):
+                ver_key.verify(
+                    b"\x00" * 32, b"\x00" * 64, mode="ph", prehashed=True
+                )

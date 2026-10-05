@@ -749,6 +749,60 @@ class TestSigningKey(unittest.TestCase):
 
         self.assertIn("Method unsupported for Edwards", str(e.exception))
 
+    def test_ed25519_sign_and_verify_ctx_ph(self):
+        sk = SigningKey.from_string(
+            b"\x34\xBA\xC7\xD1\x4E\xD4\xF1\xBC\x4F\x8C\x48\x3E\x0F\x19\x77\x4C"
+            b"\xFC\xB8\xBE\xAC\x54\x66\x45\x11\x9A\xD7\xD7\xB8\x07\x0B\xF5\xD4",
+            Ed25519,
+        )
+        vk = sk.get_verifying_key()
+
+        msg = b"message"
+
+        sig = sk.sign(msg, context=b"ctx", mode="ctx")
+        self.assertTrue(vk.verify(sig, msg, context=b"ctx", mode="ctx"))
+
+        sig = sk.sign_deterministic(msg, mode="ph")
+        self.assertTrue(vk.verify(sig, msg, mode="ph"))
+
+        # the prehashed entry produces the same signature as hashing
+        # the message internally
+        digest = hashlib.sha512(msg).digest()
+        sig_ph = sk.sign_deterministic(digest, mode="ph", prehashed=True)
+        self.assertEqual(sig, sig_ph)
+        self.assertTrue(vk.verify(sig_ph, digest, mode="ph", prehashed=True))
+
+        # signatures from one mode must not verify in another
+        with self.assertRaises(BadSignatureError):
+            vk.verify(sig, msg)
+
+        # invalid parameters are rejected, not silently ignored
+        with self.assertRaises(ValueError):
+            sk.sign(msg, mode="unsupported")
+        with self.assertRaises(ValueError):
+            sk.sign(msg, context=b"ctx", mode="pure")
+        with self.assertRaises(ValueError):
+            sk.sign(msg, context=b"a" * 256, mode="ctx")
+        with self.assertRaises(ValueError):
+            sk.sign(b"\x00" * 32, mode="ph", prehashed=True)
+        with self.assertRaises(ValueError):
+            vk.verify(sig, msg, mode="unsupported")
+
+    def test_ecdsa_rejects_eddsa_parameters(self):
+        sk = SigningKey.generate(curve=NIST256p)
+        vk = sk.get_verifying_key()
+
+        sig = sk.sign(b"message")
+
+        with self.assertRaises(ValueError):
+            sk.sign(b"message", context=b"ctx", mode="ctx")
+        with self.assertRaises(ValueError):
+            sk.sign_deterministic(b"message", mode="ph")
+        with self.assertRaises(ValueError):
+            sk.sign(b"message", prehashed=True)
+        with self.assertRaises(ValueError):
+            vk.verify(sig, b"message", mode="ph")
+
     def test_ed25519_to_der_ssleay(self):
         pem_str = (
             "-----BEGIN PRIVATE KEY-----\n"
