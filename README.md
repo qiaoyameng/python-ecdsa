@@ -435,6 +435,38 @@ assert vk.verify(signature, b"message")
 Once `precompute()` was called, all signature verifications with this key will
 be faster to execute.
 
+For batches that may mix short Weierstrass curves, public key encodings,
+digests, and raw/DER signatures, use `batch_verify_digests()`. It returns
+one result per input and never replaces individual checks with a combined
+randomised equation. A cache is local to one call unless the caller holds a
+`BatchVerificationCache`.
+
+```python
+import hashlib
+from ecdsa import (
+    NIST256p,
+    NIST384p,
+    BatchVerificationCache,
+    VALID,
+    batch_verify_digests,
+)
+
+digest_256 = hashlib.sha256(b"message").digest()
+digest_384 = hashlib.sha384(b"message").digest()
+records = [
+    (vk256, raw_signature, digest_256, None),
+    (vk256.to_string("compressed"), der_signature,
+     digest_256, NIST256p, "der"),
+    (vk384.to_der(), another_signature, digest_384, NIST384p, "der"),
+]
+
+cache = BatchVerificationCache(max_entries=1024)
+results = batch_verify_digests(records, cache=cache)
+assert len(results) == len(records)
+assert all(result.status == VALID for result in results)
+assert cache.stats.key_hits == 1
+```
+
 ## OpenSSL Compatibility
 
 To produce signatures that can be verified by OpenSSL tools, or to verify

@@ -44,6 +44,17 @@ from .ecdh import (
     InvalidSharedSecretError,
 )
 from .der import UnexpectedDER
+from .batchverify import (
+    batch_verify_digests,
+    verify_digests,
+    BatchVerificationCache,
+    BatchVerificationRequest,
+    BatchVerificationResult,
+    BatchVerificationStats,
+    INVALID,
+    PARAMETER_ERROR,
+    VALID,
+)
 from . import _version
 
 # This code comes from http://github.com/tlsfuzzer/python-ecdsa
@@ -56,6 +67,7 @@ __all__ = [
     "numbertheory",
     "test_pyecdsa",
     "util",
+    "batchverify",
     "six",
 ]
 
@@ -98,6 +110,15 @@ _hush_pyflakes = [
     BRAINPOOLP320t1,
     BRAINPOOLP384t1,
     BRAINPOOLP512t1,
+    batch_verify_digests,
+    verify_digests,
+    BatchVerificationCache,
+    BatchVerificationRequest,
+    BatchVerificationResult,
+    BatchVerificationStats,
+    INVALID,
+    PARAMETER_ERROR,
+    VALID,
 ]
 del _hush_pyflakes
 

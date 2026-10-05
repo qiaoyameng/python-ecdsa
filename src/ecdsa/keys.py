@@ -740,6 +740,71 @@ class VerifyingKey(object):
             return True
         raise BadSignatureError("Signature verification failed")
 
+    def verify_digests(
+        self,
+        records,
+        sigdecode=None,
+        allow_truncate=False,
+        cache=None,
+        max_cache_entries=1024,
+    ):
+        """
+        Verify multiple signatures using this public key.
+
+        Records are ``(signature, digest)`` pairs or
+        ``(signature, digest, signature_format)`` triples, where
+        ``signature_format`` is ``"raw"`` (the default) or ``"der"``.
+        Dictionaries with ``signature`` and ``digest`` keys are accepted.
+        See :func:`ecdsa.batchverify.batch_verify_digests` for mixed curves
+        and public key encodings.
+        """
+        from . import batchverify
+
+        converted = []
+        for position, record in enumerate(records):
+            if isinstance(record, dict):
+                try:
+                    signature = record["signature"]
+                    digest = record["digest"]
+                except KeyError as error:
+                    raise TypeError(
+                        "record {0} is missing field {1}".format(
+                            position, error
+                        )
+                    )
+                signature_format = record.get(
+                    "signature_format", "raw"
+                )
+            elif isinstance(record, (tuple, list)):
+                if len(record) == 2:
+                    signature, digest = record
+                    signature_format = "raw"
+                elif len(record) == 3:
+                    signature, digest, signature_format = record
+                else:
+                    raise TypeError(
+                        "record {0} must have two or three fields".format(
+                            position
+                        )
+                    )
+            else:
+                raise TypeError(
+                    "record {0} must be a tuple, list, or dict".format(
+                        position
+                    )
+                )
+            converted.append(
+                (self, signature, digest, None, signature_format)
+            )
+
+        return batchverify.batch_verify_digests(
+            converted,
+            sigdecode=sigdecode,
+            allow_truncate=allow_truncate,
+            cache=cache,
+            max_cache_entries=max_cache_entries,
+        )
+
 
 class SigningKey(object):
     """
