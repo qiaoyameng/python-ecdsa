@@ -19,6 +19,7 @@ Submodules
    ecdsa.eddsa
    ecdsa.ellipticcurve
    ecdsa.errors
+   ecdsa.hkdf
    ecdsa.keys
    ecdsa.numbertheory
    ecdsa.rfc6979

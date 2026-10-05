@@ -1,5 +1,20 @@
 * Release 0.19.2 (26 Mar 2026)
 
+New API:
+* New ``ecdsa.hkdf`` module with the RFC 5869 HKDF ``hkdf_extract()``,
+  ``hkdf_expand()`` and ``hkdf()`` functions and ``HKDFError``
+  exception.
+* New ``ECDH.derive_key()`` method that derives a key from the
+  fixed-width ECDH shared secret with HKDF. It takes a hash function,
+  salt, info and output length and optionally a structured
+  ``HKDFContext`` that binds the protocol name, role order
+  (initiator/responder) and both public keys in canonical SEC1
+  uncompressed encoding, with every field length-prefixed. Mismatched
+  curves, INFINITY shared points, illegal encoding lengths and role
+  confusion are rejected. Error messages never include the private key
+  or shared secret. No new cryptographic back-end dependencies were
+  added.
+
 Bug fixes:
 * Fix CVE-2026-33936, a DER parsing issue in ``remove_octet_string()``,
   ``remove_constructed()``, and ``remove_implitic()`` where a truncated buffer

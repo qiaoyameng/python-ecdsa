@@ -42,8 +42,12 @@ from .ecdh import (
     NoCurveError,
     InvalidCurveError,
     InvalidSharedSecretError,
+    InvalidContextError,
+    HKDFContext,
+    HKDFError,
 )
 from .der import UnexpectedDER
+from .hkdf import hkdf_extract, hkdf_expand, hkdf
 from . import _version
 
 # This code comes from http://github.com/tlsfuzzer/python-ecdsa

@@ -639,3 +639,26 @@ with open("remote_public_key.pem") as e:
 ecdh.load_received_public_key_pem(remote_public_key)
 secret = ecdh.generate_sharedsecret_bytes()
 ```
+
+Deriving a key from the shared secret with HKDF (RFC 5869). The shared
+secret uses the fixed byte width of the curve and a structured context can
+bind the protocol name, the role order and both canonical public keys:
+
+```python
+import hashlib
+from ecdsa import ECDH, HKDFContext, NIST256p
+
+# both parties provide their keys to the ECDH object
+ecdh = ECDH(NIST256p, local_private_key, remote_public_key)
+
+# simple derivation (hash, salt, info, output length)
+key = ecdh.derive_key(32, salt=b"salt", info=b"session-id",
+                      hashfunc=hashlib.sha256)
+
+# derivation with a structured context, identical on both sides; the
+# local role ("initiator" or "responder") prevents swapping the parties
+context = HKDFContext(b"my-protocol-v1",
+                      initiator_public_key, responder_public_key)
+key = ecdh.derive_key(32, salt=b"salt", info=b"session-id",
+                      context=context, role="initiator")
+```

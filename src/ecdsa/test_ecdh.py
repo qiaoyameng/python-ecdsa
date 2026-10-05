@@ -24,7 +24,10 @@ from .curves import curves
 from .ecdh import (
     ECDH,
     InvalidCurveError,
+    InvalidContextError,
     InvalidSharedSecretError,
+    HKDFContext,
+    HKDFError,
     NoKeyError,
     NoCurveError,
 )
@@ -447,3 +450,370 @@ def test_ecdh_with_openssl(vcurve):
 
     assert ssl_secret1 == ssl_secret2
     assert secret1 == ssl_secret1
+
+
+# Key pair on SECP112r2 chosen so that the shared x-coordinate has a
+# leading zero octet: 2 * dresponder*G has x = 0x00c19fa39fb81ba6a1b2c005fcdd.
+HKDF_CURVE = SECP112r2
+HKDF_INITIATOR_EXPONENT = 2
+HKDF_RESPONDER_EXPONENT = 197
+HKDF_LEADING_ZERO_SECRET = "00c19fa39fb81ba6a1b2c005fcdd"
+
+
+def _hkdf_key_pair():
+    initiator_key = SigningKey.from_secret_exponent(
+        HKDF_INITIATOR_EXPONENT, HKDF_CURVE
+    )
+    responder_key = SigningKey.from_secret_exponent(
+        HKDF_RESPONDER_EXPONENT, HKDF_CURVE
+    )
+    return initiator_key, responder_key
+
+
+def test_ecdh_sharedsecret_fixed_width_leading_zeros():
+    # SEC 1 defines the shared secret as the x-coordinate encoded with the
+    # fixed byte width of the curve, leading zero octets must be preserved.
+    initiator_key, responder_key = _hkdf_key_pair()
+    ecdh = ECDH(
+        curve=HKDF_CURVE,
+        private_key=initiator_key,
+        public_key=responder_key.verifying_key,
+    )
+
+    secret = ecdh.generate_sharedsecret_bytes()
+
+    field_size = HKDF_CURVE.verifying_key_length // 2
+    assert len(secret) == field_size
+    assert secret == unhexlify(HKDF_LEADING_ZERO_SECRET)
+    assert secret[0] == 0
+    # the integer representation must never be used for KDF input
+    assert len(secret) > len(format(ecdh.generate_sharedsecret(), "x")) // 2
+
+
+def test_ecdh_hkdf_interop_with_leading_zero_secret():
+    # Both sides perform HKDF derivation over a shared coordinate that
+    # starts with a zero octet; the fixed-width encoding makes the result
+    # identical for the initiator and the responder.
+    initiator_key, responder_key = _hkdf_key_pair()
+    initiator_ecdh = ECDH(
+        curve=HKDF_CURVE,
+        private_key=initiator_key,
+        public_key=responder_key.verifying_key,
+    )
+    responder_ecdh = ECDH(
+        curve=HKDF_CURVE,
+        private_key=responder_key,
+        public_key=initiator_key.verifying_key,
+    )
+
+    context_i = HKDFContext(
+        b"test-protocol-v1",
+        initiator_key.verifying_key,
+        responder_key.verifying_key,
+    )
+    context_r = HKDFContext(
+        b"test-protocol-v1",
+        initiator_key.verifying_key,
+        responder_key.verifying_key,
+    )
+
+    key_initiator = initiator_ecdh.derive_key(
+        32,
+        salt=b"non-secret-salt",
+        info=b"session-id-1",
+        context=context_i,
+        role="initiator",
+    )
+    key_responder = responder_ecdh.derive_key(
+        32,
+        salt=b"non-secret-salt",
+        info=b"session-id-1",
+        context=context_r,
+        role="responder",
+    )
+
+    assert key_initiator == key_responder
+    assert len(key_initiator) == 32
+
+    # Known answer computed with the standalone RFC 5869 implementation over
+    # the fixed-width shared secret (locks the info/salt/context layout).
+    import hashlib
+    import struct
+
+    from .hkdf import hkdf
+
+    context_encoding = context_i.encode_with(
+        initiator_key.verifying_key, responder_key.verifying_key
+    )
+    expected_info = (
+        struct.pack(">H", len(b"session-id-1"))
+        + b"session-id-1"
+        + struct.pack(">H", len(context_encoding))
+        + context_encoding
+    )
+    expected = hkdf(
+        b"non-secret-salt",
+        unhexlify(HKDF_LEADING_ZERO_SECRET),
+        expected_info,
+        32,
+        hashlib.sha256,
+    )
+    assert key_initiator == expected
+
+
+def test_ecdh_hkdf_no_context_matches_direct_hkdf():
+    import hashlib
+
+    from .hkdf import hkdf
+
+    initiator_key, responder_key = _hkdf_key_pair()
+    ecdh = ECDH(
+        HKDF_CURVE, initiator_key, responder_key.verifying_key
+    )
+
+    secret = ecdh.generate_sharedsecret_bytes()
+    assert ecdh.derive_key(48, salt=b"salt", info=b"info") == hkdf(
+        b"salt", secret, b"info", 48, hashlib.sha256
+    )
+    assert ecdh.derive_key(32) == hkdf(
+        b"", secret, b"", 32, hashlib.sha256
+    )
+
+
+def test_ecdh_hkdf_context_is_length_prefixed():
+    initiator_key, responder_key = _hkdf_key_pair()
+    context = HKDFContext(
+        b"proto", initiator_key.verifying_key, responder_key.verifying_key
+    )
+
+    encoding = context.encode_with(
+        initiator_key.verifying_key, responder_key.verifying_key
+    )
+
+    field_width = 1 + HKDF_CURVE.verifying_key_length
+    expected_length = (
+        2 + len(b"proto")
+        + 2 + field_width  # initiator key
+        + 2 + field_width  # responder key
+    )
+    assert len(encoding) == expected_length
+    assert encoding[:2] == b"\x00\x05"
+    # parse the three length-prefixed fields back
+    offset = 0
+    fields = []
+    for _i in range(3):
+        field_len = int.from_bytes(
+            encoding[offset:offset + 2], "big"
+        )
+        offset += 2
+        fields.append(encoding[offset:offset + field_len])
+        offset += field_len
+    assert offset == len(encoding)
+    protocol_field, initiator_field, responder_field = fields
+    assert protocol_field == b"proto"
+    # canonical SEC1 uncompressed encoding for both keys
+    assert initiator_field[0] == 0x04
+    assert responder_field[0] == 0x04
+    assert len(initiator_field) == len(responder_field) == field_width
+    assert initiator_field == initiator_key.verifying_key.to_string(
+        "uncompressed"
+    )
+    assert responder_field == responder_key.verifying_key.to_string(
+        "uncompressed"
+    )
+    # same encoding regardless of which side serialises it
+    assert encoding == context.encode_with(
+        responder_key.verifying_key, initiator_key.verifying_key
+    )
+
+
+def test_ecdh_hkdf_role_confusion_rejected():
+    initiator_key, responder_key = _hkdf_key_pair()
+    context = HKDFContext(
+        b"proto", initiator_key.verifying_key, responder_key.verifying_key
+    )
+    initiator_ecdh = ECDH(
+        HKDF_CURVE, initiator_key, responder_key.verifying_key
+    )
+    responder_ecdh = ECDH(
+        HKDF_CURVE, responder_key, initiator_key.verifying_key
+    )
+
+    with pytest.raises(InvalidContextError):
+        initiator_ecdh.derive_key(
+            32, context=context, role="responder"
+        )
+    with pytest.raises(InvalidContextError):
+        responder_ecdh.derive_key(
+            32, context=context, role="initiator"
+        )
+
+
+def test_ecdh_hkdf_role_required_with_context():
+    initiator_key, responder_key = _hkdf_key_pair()
+    context = HKDFContext(
+        b"proto", initiator_key.verifying_key, responder_key.verifying_key
+    )
+    ecdh = ECDH(HKDF_CURVE, initiator_key, responder_key.verifying_key)
+
+    with pytest.raises(InvalidContextError):
+        ecdh.derive_key(32, context=context)
+
+
+def test_ecdh_hkdf_unknown_role_rejected():
+    initiator_key, responder_key = _hkdf_key_pair()
+    context = HKDFContext(
+        b"proto", initiator_key.verifying_key, responder_key.verifying_key
+    )
+    ecdh = ECDH(HKDF_CURVE, initiator_key, responder_key.verifying_key)
+
+    with pytest.raises(InvalidContextError):
+        ecdh.derive_key(32, context=context, role="server")
+
+
+def test_ecdh_hkdf_unexpected_party_rejected():
+    initiator_key, responder_key = _hkdf_key_pair()
+    other_key = SigningKey.from_secret_exponent(5, HKDF_CURVE)
+    context = HKDFContext(
+        b"proto", initiator_key.verifying_key, other_key.verifying_key
+    )
+    responder_ecdh = ECDH(
+        HKDF_CURVE, responder_key, initiator_key.verifying_key
+    )
+
+    with pytest.raises(InvalidContextError):
+        responder_ecdh.derive_key(
+            32, context=context, role="responder"
+        )
+
+
+def test_ecdh_hkdf_context_curve_mismatch_rejected():
+    initiator_key, _responder_key = _hkdf_key_pair()
+    other_key = SigningKey.generate(NIST256p)
+
+    with pytest.raises(InvalidContextError):
+        HKDFContext(
+            b"proto", initiator_key.verifying_key, other_key.verifying_key
+        )
+
+
+def test_ecdh_hkdf_context_same_key_for_both_roles_rejected():
+    initiator_key, _responder_key = _hkdf_key_pair()
+
+    with pytest.raises(InvalidContextError):
+        HKDFContext(
+            b"proto",
+            initiator_key.verifying_key,
+            initiator_key.verifying_key,
+        )
+
+
+def test_ecdh_hkdf_context_invalid_types_rejected():
+    initiator_key, responder_key = _hkdf_key_pair()
+
+    with pytest.raises(InvalidContextError):
+        HKDFContext(
+            u"unicode-protocol",
+            initiator_key.verifying_key,
+            responder_key.verifying_key,
+        )
+    with pytest.raises(InvalidContextError):
+        HKDFContext(
+            b"proto", b"not-a-key", responder_key.verifying_key
+        )
+
+
+def test_ecdh_hkdf_different_protocol_produces_different_key():
+    initiator_key, responder_key = _hkdf_key_pair()
+    ecdh = ECDH(HKDF_CURVE, initiator_key, responder_key.verifying_key)
+    context_one = HKDFContext(
+        b"proto-one",
+        initiator_key.verifying_key,
+        responder_key.verifying_key,
+    )
+    context_two = HKDFContext(
+        b"proto-two",
+        initiator_key.verifying_key,
+        responder_key.verifying_key,
+    )
+
+    assert ecdh.derive_key(
+        32, context=context_one, role="initiator"
+    ) != ecdh.derive_key(32, context=context_two, role="initiator")
+
+
+def test_ecdh_hkdf_infinity_shared_secret():
+    ecdh1 = ECDH(curve=NIST256p)
+    ecdh1.generate_private_key()
+    ecdh1.load_received_public_key(
+        SigningKey.generate(NIST256p).get_verifying_key()
+    )
+    ecdh1.private_key.privkey.secret_multiplier = NIST256p.order
+
+    with pytest.raises(InvalidSharedSecretError):
+        ecdh1.derive_key(32)
+
+
+def test_ecdh_hkdf_missing_keys_rejected():
+    ecdh = ECDH(curve=HKDF_CURVE)
+    with pytest.raises(NoKeyError):
+        ecdh.derive_key(32)
+    ecdh.generate_private_key()
+    with pytest.raises(NoKeyError):
+        ecdh.derive_key(32)
+
+
+def test_ecdh_hkdf_curve_mismatch_rejected():
+    initiator_key, responder_key = _hkdf_key_pair()
+    other_key = SigningKey.generate(NIST256p)
+    ecdh = ECDH(HKDF_CURVE, initiator_key, responder_key.verifying_key)
+    ecdh.public_key = other_key.verifying_key
+
+    with pytest.raises(InvalidCurveError):
+        ecdh.derive_key(32)
+
+
+def test_ecdh_hkdf_invalid_parameters_rejected():
+    initiator_key, responder_key = _hkdf_key_pair()
+    ecdh = ECDH(HKDF_CURVE, initiator_key, responder_key.verifying_key)
+
+    with pytest.raises(HKDFError):
+        ecdh.derive_key(0)
+    with pytest.raises(HKDFError):
+        ecdh.derive_key(255 * 32 + 1)
+    with pytest.raises(HKDFError):
+        ecdh.derive_key(32, salt=u"not-bytes")
+    with pytest.raises(HKDFError):
+        ecdh.derive_key(32, info=1234)
+    with pytest.raises(HKDFError):
+        ecdh.derive_key(32, context=b"not-a-context")
+
+
+def test_ecdh_hkdf_error_messages_do_not_leak_secrets():
+    initiator_key, responder_key = _hkdf_key_pair()
+    ecdh = ECDH(HKDF_CURVE, initiator_key, responder_key.verifying_key)
+    secret = ecdh.generate_sharedsecret_bytes()
+    private_hex = format(
+        initiator_key.privkey.secret_multiplier, "x"
+    ).encode()
+
+    def collect_errors():
+        errors = []
+        for call in (
+            lambda: ecdh.derive_key(0),
+            lambda: ecdh.derive_key(32, salt=123),
+            lambda: ecdh.derive_key(32, info=u"bad"),
+            lambda: HKDFContext(
+                b"p", b"bad", responder_key.verifying_key
+            ),
+        ):
+            try:
+                call()
+            except Exception as e:  # pylint: disable=broad-except
+                errors.append(str(e))
+        return errors
+
+    for message in collect_errors():
+        assert secret not in message.encode()
+        assert secret.hex().encode() not in message.encode()
+        assert private_hex not in message.encode()
