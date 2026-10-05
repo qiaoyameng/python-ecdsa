@@ -22,4 +22,5 @@ Submodules
    ecdsa.keys
    ecdsa.numbertheory
    ecdsa.rfc6979
+   ecdsa.schnorr
    ecdsa.util

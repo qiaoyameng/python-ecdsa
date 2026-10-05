@@ -44,6 +44,7 @@ from .ecdh import (
     InvalidSharedSecretError,
 )
 from .der import UnexpectedDER
+from . import schnorr
 from . import _version
 
 # This code comes from http://github.com/tlsfuzzer/python-ecdsa
@@ -54,12 +55,14 @@ __all__ = [
     "ellipticcurve",
     "keys",
     "numbertheory",
+    "schnorr",
     "test_pyecdsa",
     "util",
     "six",
 ]
 
 _hush_pyflakes = [
+    schnorr,
     SigningKey,
     VerifyingKey,
     BadSignatureError,
