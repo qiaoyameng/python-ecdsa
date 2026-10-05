@@ -25,6 +25,8 @@ from .der import (
     encode_sequence,
     encode_oid,
     encode_bitstring,
+    encode_constructed,
+    encode_implicit,
     encode_integer,
     encode_octet_string,
 )
@@ -35,8 +37,17 @@ from .util import (
     sigdecode_string,
     sigdecode_der,
     sigdecode_strings,
+    oid_ecPublicKey,
+    number_to_string,
 )
-from .curves import NIST256p, Curve, BRAINPOOLP160r1, Ed25519, Ed448
+from .curves import (
+    NIST256p,
+    NIST384p,
+    Curve,
+    BRAINPOOLP160r1,
+    Ed25519,
+    Ed448,
+)
 from .ellipticcurve import Point, PointJacobi, CurveFp, INFINITY
 from .ecdsa import generator_brainpoolp160r1
 
@@ -1045,6 +1056,273 @@ def test_SigningKey_from_der(convert):
     sk = SigningKey.from_der(key)
 
     assert sk.to_string() == prv_key_bytes
+
+
+strict_sk = SigningKey.from_secret_exponent(0x1234567890ABCDEF, NIST256p)
+strict_public_key = strict_sk.get_verifying_key().to_string(
+    "uncompressed"
+)
+other_strict_sk = SigningKey.from_secret_exponent(
+    0xABCDEF0123456789, NIST256p
+)
+
+
+def _ec_private_key(
+    private_scalar=None,
+    curve=NIST256p,
+    private_curve=None,
+    include_parameters=True,
+    parameters_encoding="named_curve",
+    include_public_key=True,
+    public_key=None,
+    extra=b"",
+    version=1,
+):
+    private_curve = private_curve or curve
+    if private_scalar is None:
+        private_scalar = strict_sk.privkey.secret_multiplier
+    elements = [
+        encode_integer(version),
+        encode_octet_string(
+            number_to_string(private_scalar, private_curve.order)
+        ),
+    ]
+    if include_parameters:
+        elements.append(
+            encode_constructed(0, curve.to_der(parameters_encoding))
+        )
+    if include_public_key:
+        if public_key is None:
+            public_key = strict_public_key
+        elements.append(
+            encode_constructed(1, encode_bitstring(public_key, 0))
+        )
+    elements.append(extra)
+    return encode_sequence(*[element for element in elements if element])
+
+
+def _pkcs8_key(
+    outer_curve=NIST256p,
+    outer_parameters_encoding="named_curve",
+    inner_curve=None,
+    include_public_key=True,
+    public_key=None,
+    private_scalar=None,
+    inner_private_curve=None,
+    inner_parameters_encoding="named_curve",
+    extra=b"",
+    version=1,
+):
+    ec_private_key = _ec_private_key(
+        private_scalar=private_scalar,
+        curve=inner_curve or outer_curve,
+        include_parameters=inner_curve is not None,
+        parameters_encoding=inner_parameters_encoding,
+        include_public_key=include_public_key,
+        public_key=public_key,
+        private_curve=inner_private_curve or outer_curve,
+    )
+    return encode_sequence(
+        encode_integer(version),
+        encode_sequence(
+            encode_oid(*oid_ecPublicKey),
+            outer_curve.to_der(outer_parameters_encoding),
+        ),
+        encode_octet_string(ec_private_key),
+        extra,
+    )
+
+
+@pytest.mark.parametrize("key_format", ["ssleay", "pkcs8"])
+def test_strict_signing_key_import_baseline(key_format):
+    encoded = strict_sk.to_der(format=key_format)
+
+    assert SigningKey.from_der(encoded, strict=True) == strict_sk
+    assert SigningKey.from_pem(
+        strict_sk.to_pem(format=key_format), strict=True
+    ) == strict_sk
+
+
+@pytest.mark.parametrize("key_format", ["ssleay", "pkcs8"])
+def test_strict_signing_key_import_without_public_key(
+    key_format
+):
+    if key_format == "ssleay":
+        encoded = _ec_private_key(include_public_key=False)
+    else:
+        encoded = _pkcs8_key(include_public_key=False)
+
+    assert SigningKey.from_der(encoded, strict=True) == strict_sk
+
+
+@pytest.mark.parametrize("format", ["ssleay", "pkcs8"])
+def test_strict_import_explicit_curve_baseline(format):
+    encoded = strict_sk.to_der(
+        format=format, curve_parameters_encoding="explicit"
+    )
+
+    assert (
+        SigningKey.from_der(
+            encoded, strict=True, valid_curve_encodings=["explicit"]
+        )
+        == strict_sk
+    )
+
+
+def test_strict_import_rejects_explicit_curve_when_disabled():
+    encoded = strict_sk.to_der(
+        format="pkcs8", curve_parameters_encoding="explicit"
+    )
+
+    with pytest.raises(UnexpectedDER, match="explicit curve"):
+        SigningKey.from_der(
+            encoded, strict=True, valid_curve_encodings=["named_curve"]
+        )
+
+
+def test_strict_pkcs8_import_matching_inner_explicit_curve():
+    encoded = _pkcs8_key(inner_curve=NIST256p)
+
+    assert SigningKey.from_der(encoded, strict=True) == strict_sk
+
+    explicit_encoded = _pkcs8_key(
+        inner_curve=NIST256p,
+        inner_parameters_encoding="explicit",
+    )
+    assert SigningKey.from_der(explicit_encoded, strict=True) == strict_sk
+
+    cross_encoded = _pkcs8_key(
+        outer_parameters_encoding="explicit",
+        inner_curve=NIST256p,
+        inner_parameters_encoding="named_curve",
+    )
+    assert SigningKey.from_der(cross_encoded, strict=True) == strict_sk
+
+
+def test_strict_pkcs8_import_matching_outer_public_key():
+    encoded = _pkcs8_key(
+        include_public_key=False,
+        extra=encode_implicit(
+            1, encode_bitstring(strict_public_key, 0)
+        ),
+    )
+
+    assert SigningKey.from_der(encoded, strict=True) == strict_sk
+
+
+def test_strict_pkcs8_rejects_conflicting_outer_public_key():
+    encoded = _pkcs8_key(
+        include_public_key=False,
+        extra=encode_implicit(
+            1,
+            encode_bitstring(
+                other_strict_sk.get_verifying_key().to_string(
+                    "uncompressed"
+                ),
+                0,
+            ),
+        ),
+    )
+
+    with pytest.raises(UnexpectedDER, match="public key does not match"):
+        SigningKey.from_der(encoded, strict=True)
+
+
+def test_strict_pkcs8_rejects_conflicting_inner_curve():
+    encoded = _pkcs8_key(
+        inner_curve=NIST384p,
+        inner_private_curve=NIST384p,
+        include_public_key=False,
+    )
+
+    with pytest.raises(UnexpectedDER, match="inner curve"):
+        SigningKey.from_der(encoded, strict=True)
+
+
+@pytest.mark.parametrize("key_format", ["ssleay", "pkcs8"])
+def test_strict_import_rejects_conflicting_public_key(key_format):
+    wrong_public_key = other_strict_sk.get_verifying_key().to_string(
+        "uncompressed"
+    )
+    if key_format == "ssleay":
+        encoded = _ec_private_key(public_key=wrong_public_key)
+    else:
+        encoded = _pkcs8_key(public_key=wrong_public_key)
+
+    with pytest.raises(UnexpectedDER, match="public key does not match"):
+        SigningKey.from_der(encoded, strict=True)
+
+
+@pytest.mark.parametrize("key_format", ["ssleay", "pkcs8"])
+def test_strict_import_rejects_duplicate_optional_fields(key_format):
+    duplicated_parameters = encode_constructed(
+        0, NIST256p.to_der("named_curve")
+    )
+    if key_format == "ssleay":
+        encoded = _ec_private_key(extra=duplicated_parameters)
+        match = "duplicate EC private key"
+    else:
+        encoded = _pkcs8_key(
+            extra=duplicated_parameters + duplicated_parameters
+        )
+        match = "duplicate PKCS#8"
+
+    with pytest.raises(UnexpectedDER, match=match):
+        SigningKey.from_der(encoded, strict=True)
+
+
+@pytest.mark.parametrize("key_format", ["ssleay", "pkcs8"])
+def test_strict_import_rejects_illegal_version(key_format):
+    if key_format == "ssleay":
+        encoded = _ec_private_key(version=0)
+        match = "invalid EC private key version"
+    else:
+        encoded = _pkcs8_key(version=2)
+        match = "invalid PKCS#8 version"
+
+    with pytest.raises(UnexpectedDER, match=match):
+        SigningKey.from_der(encoded, strict=True)
+
+
+@pytest.mark.parametrize("key_format", ["ssleay", "pkcs8"])
+def test_strict_import_rejects_trailing_data(key_format):
+    if key_format == "ssleay":
+        encoded = _ec_private_key(extra=encode_integer(2))
+    else:
+        encoded = _pkcs8_key(extra=encode_integer(2))
+
+    with pytest.raises(UnexpectedDER, match="trailing junk"):
+        SigningKey.from_der(encoded, strict=True)
+
+
+@pytest.mark.parametrize(
+    "private_scalar,key_format",
+    [
+        (0, "ssleay"),
+        (NIST256p.order, "pkcs8"),
+    ],
+)
+def test_strict_import_rejects_invalid_private_key_range(
+    private_scalar, key_format
+):
+    if key_format == "ssleay":
+        encoded = _ec_private_key(private_scalar=private_scalar)
+    else:
+        encoded = _pkcs8_key(private_scalar=private_scalar)
+
+    with pytest.raises(MalformedPointError, match="Invalid value"):
+        SigningKey.from_der(encoded, strict=True)
+
+
+def test_legacy_import_ignores_conflicting_inner_curve_and_public_key():
+    encoded = _pkcs8_key(
+        inner_curve=NIST384p,
+        public_key=other_strict_sk.get_verifying_key().to_string(
+            "uncompressed"
+        ),
+    )
+
+    assert SigningKey.from_der(encoded) == strict_sk
 
 
 # test SigningKey.sign_deterministic()

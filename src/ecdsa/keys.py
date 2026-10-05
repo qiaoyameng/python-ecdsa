@@ -10,7 +10,7 @@ from . import ecdsa, eddsa
 from . import der, ssh
 from . import rfc6979
 from . import ellipticcurve
-from .curves import NIST192p, Curve, Ed25519, Ed448
+from .curves import NIST192p, Curve, Ed25519, Ed448, UnknownCurveError
 from .ecdsa import RSZeroError
 from .util import string_to_number, number_to_string, randrange
 from .util import sigencode_string, sigdecode_string, bit_length
@@ -54,6 +54,10 @@ class BadDigestError(Exception):
     """Raised in case the selected hash is too large for the curve."""
 
     pass
+
+
+def _curves_match(left, right):
+    return left == right and left.order == right.order
 
 
 def _truncate_and_convert_digest(digest, curve, allow_truncate):
@@ -928,7 +932,13 @@ class SigningKey(object):
         return cls.from_secret_exponent(secexp, curve, hashfunc)
 
     @classmethod
-    def from_pem(cls, string, hashfunc=sha1, valid_curve_encodings=None):
+    def from_pem(
+        cls,
+        string,
+        hashfunc=sha1,
+        valid_curve_encodings=None,
+        strict=False,
+    ):
         """
         Initialise from key stored in :term:`PEM` format.
 
@@ -952,6 +962,8 @@ class SigningKey(object):
             for curve parameters. By default (``None``) all are supported:
             ``named_curve`` and ``explicit``.
         :type valid_curve_encodings: :term:`set-like object`
+        :param bool strict: validate all curve parameters, public keys,
+            optional fields, and trailing data in the encoded key
 
 
         :raises MalformedPointError: if the length of encoding doesn't match
@@ -977,10 +989,13 @@ class SigningKey(object):
             der.unpem(string[private_key_index:]),
             hashfunc,
             valid_curve_encodings,
+            strict,
         )
 
     @classmethod
-    def from_der(cls, string, hashfunc=sha1, valid_curve_encodings=None):
+    def _from_der_legacy(
+        cls, string, hashfunc, valid_curve_encodings
+    ):
         """
         Initialise from key stored in :term:`DER` format.
 
@@ -1152,6 +1167,270 @@ class SigningKey(object):
                 b"\x00" * (curve.baselen - len(privkey_str)) + privkey_str
             )
         return cls.from_string(privkey_str, curve, hashfunc)
+
+    @classmethod
+    def _strict_curve(cls, data, valid_curve_encodings, location):
+        try:
+            return Curve.from_der(data, valid_curve_encodings)
+        except UnknownCurveError as error:
+            raise der.UnexpectedDER(
+                "{0} curve parameters refer to an unsupported curve: "
+                "{1}".format(location, error)
+            )
+
+    @classmethod
+    def _strict_ec_private_key(
+        cls,
+        string,
+        hashfunc,
+        valid_curve_encodings,
+        outer_curve=None,
+        outer_tail=b"",
+    ):
+        outer_tail = bytes(normalise_bytes(outer_tail))
+        inner, empty = der.remove_sequence(string)
+        if empty:
+            raise der.UnexpectedDER(
+                "trailing junk after EC private key: %s"
+                % binascii.hexlify(empty)
+            )
+
+        version, inner = der.remove_integer(inner)
+        if version != 1:
+            raise der.UnexpectedDER(
+                "invalid EC private key version, expected '1', got %d"
+                % version
+            )
+
+        privkey_str, inner = der.remove_octet_string(inner)
+
+        inner_curve = None
+        inner_public_key = None
+        last_tag = None
+
+        while inner:
+            first_byte = inner[0]
+            if first_byte not in (0xA0, 0xA1):
+                if (first_byte & 0xC0) != 0x80:
+                    raise der.UnexpectedDER(
+                        "trailing junk after EC private key fields"
+                    )
+                if first_byte & 0x1F <= 1:
+                    raise der.UnexpectedDER(
+                        "invalid encoding of EC private key field %d"
+                        % (first_byte & 0x1F)
+                    )
+                raise der.UnexpectedDER(
+                    "unexpected EC private key field %d"
+                    % (first_byte & 0x1F)
+                )
+            tag, value, inner = der.remove_constructed(inner)
+            if (
+                tag not in (0, 1)
+                or last_tag is not None
+                and tag <= last_tag
+            ):
+                raise der.UnexpectedDER(
+                    "unexpected or duplicate EC private key field %d" % tag
+                )
+            last_tag = tag
+            if tag == 0:
+                inner_curve = cls._strict_curve(
+                    value,
+                    valid_curve_encodings,
+                    "Inner",
+                )
+            else:
+                public_key_str, rest = der.remove_bitstring(value, 0)
+                if rest:
+                    raise der.UnexpectedDER(
+                        "trailing junk after EC public key"
+                    )
+                inner_public_key = public_key_str
+
+        if outer_curve is None:
+            curve = inner_curve
+            if curve is None:
+                raise der.UnexpectedDER(
+                    "missing curve parameters in EC private key"
+                )
+        else:
+            curve = outer_curve
+            if inner_curve is not None and not _curves_match(
+                outer_curve, inner_curve
+            ):
+                raise der.UnexpectedDER(
+                    "inner curve parameters do not match outer curve "
+                    "parameters"
+                )
+
+        outer_public_key = None
+        last_outer_tag = None
+        while outer_tail:
+            tag_byte = outer_tail[:1]
+            tag_class = tag_byte[0] & 0xC0
+            if tag_class != 0x80:
+                raise der.UnexpectedDER(
+                    "trailing junk after PKCS#8 private key"
+                )
+            tag = tag_byte[0] & 0x1F
+            if tag > 1:
+                raise der.UnexpectedDER("unexpected PKCS#8 field %d" % tag)
+            if last_outer_tag is not None and tag <= last_outer_tag:
+                raise der.UnexpectedDER(
+                    "unexpected or duplicate PKCS#8 field %d" % tag
+                )
+            last_outer_tag = tag
+            if tag == 0:
+                if tag_byte != b"\xa0":
+                    raise der.UnexpectedDER(
+                        "invalid encoding of PKCS#8 attributes field"
+                    )
+                _, value, outer_tail = der.remove_constructed(outer_tail)
+                continue
+
+            if tag_byte != b"\x81":
+                raise der.UnexpectedDER(
+                    "invalid encoding of PKCS#8 public key field"
+                )
+            _, value, outer_tail = der.remove_implicit(outer_tail)
+            point_string = value
+            point_string, rest = der.remove_bitstring(point_string, 0)
+            if rest:
+                raise der.UnexpectedDER(
+                    "trailing junk after PKCS#8 public point"
+                )
+            outer_public_key = point_string
+
+        public_key_str = inner_public_key
+        if outer_public_key is not None:
+            if (
+                public_key_str is not None
+                and public_key_str != outer_public_key
+            ):
+                raise der.UnexpectedDER(
+                    "PKCS#8 public key does not match inner public key"
+                )
+            public_key_str = outer_public_key
+
+        if len(privkey_str) > curve.baselen:
+            raise MalformedPointError(
+                "Invalid length of private key, received {0}, "
+                "expected {1}".format(len(privkey_str), curve.baselen)
+            )
+        if not privkey_str:
+            raise MalformedPointError(
+                "Invalid value for secexp, expected integer "
+                "between 1 and {0}".format(curve.order)
+            )
+
+        privkey_str = (
+            b"\x00" * (curve.baselen - len(privkey_str)) + privkey_str
+        )
+        secexp = string_to_number(privkey_str)
+        if not 1 <= secexp < curve.order:
+            raise MalformedPointError(
+                "Invalid value for secexp, expected integer "
+                "between 1 and {0}".format(curve.order)
+            )
+
+        if public_key_str is not None:
+            verifying_key = VerifyingKey.from_string(
+                public_key_str,
+                curve,
+                hashfunc=hashfunc,
+                valid_encodings=set(
+                    ["uncompressed", "compressed", "hybrid"]
+                ),
+            )
+            expected_point = curve.generator * secexp
+            if hasattr(expected_point, "scale"):
+                expected_point = expected_point.scale()
+            if verifying_key.pubkey.point != expected_point:
+                raise der.UnexpectedDER(
+                    "public key does not match private key"
+                )
+
+        return cls.from_secret_exponent(secexp, curve, hashfunc)
+
+    @classmethod
+    def from_der(
+        cls,
+        string,
+        hashfunc=sha1,
+        valid_curve_encodings=None,
+        strict=False,
+    ):
+        """
+        Initialise a signing key from DER-encoded SEC1 or PKCS#8 data.
+
+        When ``strict`` is false, the historical lenient behaviour is
+        preserved. When it is true, redundant curve parameters are checked
+        for consistency, an included public key must equal the private scalar
+        multiplied by the generator, optional fields may not be duplicated,
+        versions and trailing data must be valid, and the private scalar must
+        be in the range accepted by the curve.
+
+        See the historical lenient implementation for the complete syntax
+        of the accepted SEC1 and PKCS#8 structures.
+        """
+        if not strict:
+            return cls._from_der_legacy(
+                string, hashfunc, valid_curve_encodings
+            )
+
+        s = normalise_bytes(string)
+        s, empty = der.remove_sequence(s)
+        if empty:
+            raise der.UnexpectedDER(
+                "trailing junk after DER private key: %s"
+                % binascii.hexlify(empty)
+            )
+
+        version, s = der.remove_integer(s)
+        if not der.is_sequence(s):
+            if version != 1:
+                raise der.UnexpectedDER(
+                    "invalid EC private key version, expected '1', got %d"
+                    % version
+                )
+            return cls._strict_ec_private_key(
+                string, hashfunc, valid_curve_encodings
+            )
+
+        if version not in (0, 1):
+            raise der.UnexpectedDER(
+                "invalid PKCS#8 version, expected '0' or '1', got %d"
+                % version
+            )
+
+        algorithm, s = der.remove_sequence(s)
+        algorithm_oid, algorithm_parameters = der.remove_object(algorithm)
+        if algorithm_oid in (Ed25519.oid, Ed448.oid):
+            raise der.UnexpectedDER(
+                "strict EC private key parsing does not support EdDSA keys"
+            )
+        if algorithm_oid not in (oid_ecPublicKey, oid_ecDH, oid_ecMQV):
+            raise der.UnexpectedDER(
+                "unexpected algorithm identifier '%s'" % (algorithm_oid,)
+            )
+        if not algorithm_parameters:
+            raise der.UnexpectedDER(
+                "missing curve parameters in PKCS#8 algorithm identifier"
+            )
+
+        outer_curve = cls._strict_curve(
+            algorithm_parameters, valid_curve_encodings, "Outer"
+        )
+
+        private_key_octets, outer_tail = der.remove_octet_string(s)
+        return cls._strict_ec_private_key(
+            private_key_octets,
+            hashfunc,
+            valid_curve_encodings,
+            outer_curve,
+            outer_tail,
+        )
 
     def to_string(self):
         """
