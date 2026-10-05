@@ -1,3 +1,10 @@
+Unreleased
+
+New API:
+* ``strict`` parameter for ``SigningKey.from_pem()`` and
+  ``SigningKey.from_der()`` validates SEC1 and PKCS#8 ECDSA private keys,
+  including curve parameter consistency and the embedded public key.
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:

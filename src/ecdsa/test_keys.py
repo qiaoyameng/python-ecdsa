@@ -10,6 +10,7 @@ except NameError:
 
 import os
 import array
+import binascii
 import pytest
 import hashlib
 
@@ -27,6 +28,7 @@ from .der import (
     encode_bitstring,
     encode_integer,
     encode_octet_string,
+    encode_constructed,
 )
 from .util import (
     sigencode_string,
@@ -35,8 +37,16 @@ from .util import (
     sigdecode_string,
     sigdecode_der,
     sigdecode_strings,
+    oid_ecPublicKey,
 )
-from .curves import NIST256p, Curve, BRAINPOOLP160r1, Ed25519, Ed448
+from .curves import (
+    NIST256p,
+    NIST384p,
+    Curve,
+    BRAINPOOLP160r1,
+    Ed25519,
+    Ed448,
+)
 from .ellipticcurve import Point, PointJacobi, CurveFp, INFINITY
 from .ecdsa import generator_brainpoolp160r1
 
@@ -857,6 +867,358 @@ class TestSigningKey(unittest.TestCase):
         decoded = SigningKey.from_pem(sk.to_pem(format="pkcs8"))
 
         self.assertEqual(decoded, sk)
+
+
+class TestStrictPrivateKeyImport(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sk = SigningKey.from_secret_exponent(
+            12345, NIST256p, hashlib.sha256
+        )
+        cls.other_sk = SigningKey.from_secret_exponent(
+            54321, NIST256p, hashlib.sha256
+        )
+
+    def ec_private_key(
+        self,
+        curve=NIST256p,
+        parameters_encoding="named_curve",
+        include_parameters=True,
+        include_public_key=True,
+        wrong_public_key=False,
+        duplicate_parameters=False,
+        duplicate_public_key=False,
+        version=1,
+        private_key=None,
+        trailing_data=b"",
+    ):
+        if private_key is None:
+            private_key = self.sk.to_string()
+
+        elements = [
+            encode_integer(version),
+            encode_octet_string(private_key),
+        ]
+
+        if include_parameters:
+            elements.append(
+                encode_constructed(
+                    0, curve.to_der(parameters_encoding)
+                )
+            )
+
+        if duplicate_parameters:
+            elements.append(
+                encode_constructed(
+                    0, curve.to_der(parameters_encoding)
+                )
+            )
+
+        if include_public_key:
+            public_key_sk = self.other_sk if wrong_public_key else self.sk
+            elements.append(
+                encode_constructed(
+                    1,
+                    encode_bitstring(
+                        b"\x04" + public_key_sk.verifying_key.to_string(),
+                        0,
+                    ),
+                )
+            )
+
+        if duplicate_public_key:
+            elements.append(
+                encode_constructed(
+                    1,
+                    encode_bitstring(
+                        b"\x04" + self.sk.verifying_key.to_string(),
+                        0,
+                    ),
+                )
+            )
+
+        if trailing_data:
+            elements.append(trailing_data)
+
+        return encode_sequence(*elements)
+
+    def pkcs8(
+        self,
+        ec_private_key,
+        curve_encoding="named_curve",
+        version=1,
+        trailing_data=b"",
+        ec_trailing_data=b"",
+    ):
+        algorithm = encode_sequence(
+            encode_oid(*oid_ecPublicKey),
+            NIST256p.to_der(curve_encoding),
+        )
+        elements = [
+            encode_integer(version),
+            algorithm,
+            encode_octet_string(ec_private_key + ec_trailing_data),
+        ]
+        if trailing_data:
+            elements.append(trailing_data)
+        return encode_sequence(*elements)
+
+    def assert_strict_error(self, key_der, message):
+        with self.assertRaises(
+            (UnexpectedDER, MalformedPointError)
+        ) as error:
+            SigningKey.from_der(key_der, strict=True)
+        self.assertIn(message, str(error.exception))
+
+    def test_current_export_is_a_strict_baseline(self):
+        baselines = [
+            self.sk.to_der(),
+            self.sk.to_der(curve_parameters_encoding="explicit"),
+            self.sk.to_der(format="pkcs8"),
+            self.sk.to_der(
+                format="pkcs8", curve_parameters_encoding="explicit"
+            ),
+        ]
+
+        for key_der in baselines:
+            self.assertEqual(
+                SigningKey.from_der(key_der, strict=True), self.sk
+            )
+
+    def test_matching_optional_fields_are_accepted(self):
+        baselines = [
+            self.ec_private_key(include_public_key=False),
+            self.pkcs8(
+                self.ec_private_key(include_parameters=False)
+            ),
+            self.pkcs8(
+                self.ec_private_key(
+                    include_parameters=False,
+                    include_public_key=False,
+                )
+            ),
+            self.pkcs8(self.ec_private_key()),
+            self.pkcs8(
+                self.ec_private_key(
+                    parameters_encoding="explicit"
+                ),
+                curve_encoding="explicit",
+            ),
+        ]
+
+        for key_der in baselines:
+            self.assertEqual(
+                SigningKey.from_der(key_der, strict=True), self.sk
+            )
+
+    def test_short_private_key_encoding_is_accepted(self):
+        key_der = self.ec_private_key(
+            private_key=b"\x01",
+            include_public_key=False,
+        )
+
+        self.assertEqual(
+            SigningKey.from_secret_exponent(
+                1, NIST256p, hashlib.sha256
+            ),
+            SigningKey.from_der(key_der, strict=True),
+        )
+
+    def test_strict_option_works_for_pem(self):
+        for key_pem in (
+            self.sk.to_pem(),
+            self.sk.to_pem(format="pkcs8"),
+        ):
+            self.assertEqual(
+                SigningKey.from_pem(key_pem, strict=True), self.sk
+            )
+
+    def test_ed25519_strict_baseline(self):
+        ed25519_key = SigningKey.generate(Ed25519)
+
+        self.assertEqual(
+            SigningKey.from_der(
+                ed25519_key.to_der(format="pkcs8"),
+                strict=True,
+            ),
+            ed25519_key,
+        )
+
+    def test_conflicting_inner_curve_is_rejected(self):
+        generator = NIST256p.generator
+        wrong_order_generator = PointJacobi(
+            NIST256p.curve,
+            generator.x(),
+            generator.y(),
+            1,
+            NIST256p.order + 1,
+            generator=True,
+        )
+        wrong_order_curve = Curve(
+            "NIST256p with wrong order",
+            NIST256p.curve,
+            wrong_order_generator,
+            None,
+        )
+
+        for curve in (NIST384p, wrong_order_curve):
+            key_der = self.pkcs8(
+                self.ec_private_key(
+                    curve=curve,
+                    parameters_encoding="explicit",
+                )
+            )
+
+            self.assert_strict_error(
+                key_der, "conflicting curve parameters"
+            )
+
+    def test_conflicting_public_key_is_rejected(self):
+        key_der = self.pkcs8(
+            self.ec_private_key(wrong_public_key=True)
+        )
+
+        self.assert_strict_error(
+            key_der, "public key does not match private key"
+        )
+
+    def test_duplicate_parameters_are_rejected(self):
+        for key_der in (
+            self.ec_private_key(
+                duplicate_parameters=True,
+                include_public_key=False,
+            ),
+            self.pkcs8(
+                self.ec_private_key(
+                    duplicate_parameters=True,
+                    include_public_key=False,
+                )
+            ),
+        ):
+            self.assert_strict_error(
+                key_der, "duplicate parameters field"
+            )
+
+    def test_duplicate_public_keys_are_rejected(self):
+        for key_der in (
+            self.ec_private_key(duplicate_public_key=True),
+            self.pkcs8(
+                self.ec_private_key(duplicate_public_key=True)
+            ),
+        ):
+            self.assert_strict_error(
+                key_der, "duplicate publicKey field"
+            )
+
+    def test_invalid_ec_private_key_version_is_rejected(self):
+        for key_der in (
+            self.ec_private_key(version=2),
+            self.pkcs8(self.ec_private_key(version=2)),
+        ):
+            self.assert_strict_error(
+                key_der, "expected version '1' in ECPrivateKey"
+            )
+
+    def test_invalid_pkcs8_version_is_rejected(self):
+        key_der = self.pkcs8(
+            self.ec_private_key(), version=2
+        )
+
+        self.assert_strict_error(
+            key_der, "expected version '0' or '1' at start of PKCS#8"
+        )
+
+    def test_trailing_ec_private_key_data_is_rejected(self):
+        key_der = self.pkcs8(
+            self.ec_private_key(
+                trailing_data=encode_integer(2)
+            )
+        )
+
+        self.assert_strict_error(
+            key_der, "trailing junk inside ECPrivateKey"
+        )
+
+    def test_trailing_pkcs8_data_is_rejected(self):
+        key_der = self.pkcs8(
+            self.ec_private_key(),
+            trailing_data=encode_integer(0),
+        )
+
+        self.assert_strict_error(
+            key_der, "trailing junk after PKCS#8 private key"
+        )
+
+    def test_trailing_ec_private_key_octet_data_is_rejected(self):
+        key_der = self.pkcs8(
+            self.ec_private_key(),
+            ec_trailing_data=encode_integer(2),
+        )
+
+        self.assert_strict_error(
+            key_der, "trailing junk after DER privkey"
+        )
+
+    def test_trailing_der_data_is_rejected(self):
+        key_der = self.sk.to_der() + b"junk"
+
+        self.assert_strict_error(
+            key_der, "trailing junk after DER privkey"
+        )
+
+    def test_invalid_private_key_range_is_rejected(self):
+        for private_key in (
+            b"\x00" * NIST256p.baselen,
+            binascii.unhexlify(
+                    format(NIST256p.order, "x").zfill(
+                        2 * NIST256p.baselen
+                    )
+                ),
+        ):
+            key_der = self.pkcs8(
+                self.ec_private_key(private_key=private_key)
+            )
+
+            self.assert_strict_error(
+                key_der, "Invalid value for private key"
+            )
+
+    def test_explicit_curve_option_is_respected(self):
+        key_der = self.sk.to_der(
+            curve_parameters_encoding="explicit"
+        )
+
+        with self.assertRaises(UnexpectedDER) as error:
+            SigningKey.from_der(
+                key_der,
+                strict=True,
+                valid_curve_encodings=["named_curve"],
+            )
+
+        self.assertIn(
+            "explicit curve parameters not allowed",
+            str(error.exception),
+        )
+
+    def test_legacy_import_remains_lenient_by_default(self):
+        lenient_samples = [
+            self.pkcs8(self.ec_private_key(curve=NIST384p)),
+            self.pkcs8(self.ec_private_key(wrong_public_key=True)),
+            self.pkcs8(self.ec_private_key(duplicate_parameters=True)),
+            self.pkcs8(self.ec_private_key(duplicate_public_key=True)),
+            self.pkcs8(
+                self.ec_private_key(),
+                trailing_data=encode_integer(0),
+            ),
+        ]
+
+        for key_der in lenient_samples:
+            self.assertEqual(
+                SigningKey.from_der(key_der), self.sk
+            )
+            self.assertEqual(
+                SigningKey.from_der(key_der, strict=False), self.sk
+            )
 
 
 class TestTrivialCurve(unittest.TestCase):
