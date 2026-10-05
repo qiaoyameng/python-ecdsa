@@ -279,6 +279,42 @@ def sigencode_string(r, s, order):
     return r_str + s_str
 
 
+def sigencode_string_recoverable(r, s, recovery_id, order):
+    """
+    Encode the signature to a compact, recoverable format.
+
+    The format is a simple concatenation of a one byte recovery identifier
+    (the :term:`recovery ID`) followed by the ``r`` and ``s`` parameters of
+    the ECDSA signature, each encoded using the fixed number of bytes of the
+    curve order::
+
+        recovery_id || r || s
+
+    Unlike the :term:`raw encoding`, the recovery ID allows the public key of
+    the signer to be recovered from the signature and the signed digest;
+    see VerifyingKey.from_public_key_recovery_recoverable_with_digest.
+
+    :param int r: first parameter of the signature
+    :param int s: second parameter of the signature
+    :param int recovery_id: recovery identifier, selects which of the
+        candidate ephemeral points (and public keys) is the correct one
+    :param int order: the order of the curve over which the signature was
+        computed
+
+    :raises MalformedSignature: when the ``recovery_id`` is out of the
+        supported range (0 to 3)
+
+    :return: compact encoding of a recoverable ECDSA signature
+    :rtype: bytes
+    """
+    if not 0 <= recovery_id <= 3:
+        raise MalformedSignature(
+            "Invalid recovery ID, expected value between 0 and 3, "
+            "provided value is {0}".format(recovery_id)
+        )
+    return int2byte(recovery_id) + sigencode_string(r, s, order)
+
+
 def sigencode_der(r, s, order):
     """
     Encode the signature into the ECDSA-Sig-Value structure using :term:`DER`.
@@ -444,6 +480,48 @@ def sigdecode_string(signature, order):
     r = string_to_number_fixedlen(signature[:l], order)
     s = string_to_number_fixedlen(signature[l:], order)
     return r, s
+
+
+def sigdecode_string_recoverable(signature, order):
+    """
+    Decoder for the compact recoverable encoding produced by
+    :func:`sigencode_string_recoverable`.
+
+    The expected layout is::
+
+        recovery_id || r || s
+
+    where ``recovery_id`` is a single byte and ``r`` and ``s`` are each
+    encoded using the fixed number of bytes of the curve order.
+
+    :param signature: encoded recoverable signature
+    :type signature: bytes like object
+    :param order: order of the curve over which the signature was computed
+    :type order: int
+
+    :raises MalformedSignature: when the encoding of the signature is invalid
+        (wrong length or recovery ID out of range)
+
+    :return: tuple with decoded ``r``, ``s`` and ``recovery_id``
+    :rtype: tuple of ints
+    """
+    signature = normalise_bytes(signature)
+    l = orderlen(order)
+    if len(signature) != 1 + 2 * l:
+        raise MalformedSignature(
+            "Invalid length of recoverable signature, expected {0} bytes "
+            "long, provided string is {1} bytes long".format(
+                1 + 2 * l, len(signature)
+            )
+        )
+    recovery_id = signature[0]
+    if not 0 <= recovery_id <= 3:
+        raise MalformedSignature(
+            "Invalid recovery ID, expected value between 0 and 3, "
+            "provided value is {0}".format(recovery_id)
+        )
+    r, s = sigdecode_string(signature[1:], order)
+    return r, s, recovery_id
 
 
 def sigdecode_strings(rs_strings, order):

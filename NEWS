@@ -1,3 +1,19 @@
+* Unreleased
+
+New API:
+* Compact, recoverable ECDSA signatures that carry ``r``, ``s`` and a
+  recovery ID. ``SigningKey.sign_digest_recoverable`` and
+  ``SigningKey.sign_recoverable`` create them (RFC6979 nonces, optional
+  low-``s`` normalisation that adjusts the recovery ID at the same time),
+  ``VerifyingKey.from_public_key_recovery_recoverable_with_digest`` and
+  ``VerifyingKey.from_public_key_recovery_recoverable`` recover the single
+  public key of the signer. The low level entry points are
+  ``Private_key.sign_recoverable`` and ``Signature.recover_public_key``.
+  The ``util.sigencode_string_recoverable`` and
+  ``util.sigdecode_string_recoverable`` functions provide the byte encoding
+  (a single recovery ID byte followed by fixed length ``r`` and ``s``).
+  The first version supports the SECP256k1 and NIST256p curves.
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:

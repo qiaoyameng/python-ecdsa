@@ -7,6 +7,7 @@ from .keys import (
     BadSignatureError,
     BadDigestError,
     MalformedPointError,
+    InvalidRecoveryError,
 )
 from .curves import (
     NIST192p,
@@ -65,6 +66,7 @@ _hush_pyflakes = [
     BadSignatureError,
     BadDigestError,
     MalformedPointError,
+    InvalidRecoveryError,
     UnexpectedDER,
     InvalidCurveError,
     NoKeyError,

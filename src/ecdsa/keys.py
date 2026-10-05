@@ -10,10 +10,23 @@ from . import ecdsa, eddsa
 from . import der, ssh
 from . import rfc6979
 from . import ellipticcurve
-from .curves import NIST192p, Curve, Ed25519, Ed448
-from .ecdsa import RSZeroError
+from .curves import (
+    NIST192p,
+    NIST256p,
+    SECP256k1,
+    Curve,
+    Ed25519,
+    Ed448,
+)
+from .ecdsa import RSZeroError, InvalidRecoveryError
 from .util import string_to_number, number_to_string, randrange
-from .util import sigencode_string, sigdecode_string, bit_length
+from .util import (
+    sigencode_string,
+    sigdecode_string,
+    sigencode_string_recoverable,
+    sigdecode_string_recoverable,
+    bit_length,
+)
 from .util import (
     oid_ecPublicKey,
     encoded_oid_ecPublicKey,
@@ -32,7 +45,14 @@ __all__ = [
     "VerifyingKey",
     "SigningKey",
     "MalformedPointError",
+    "InvalidRecoveryError",
+    "RECOVERABLE_ECDSA_CURVES",
 ]
+
+#: Curves supported by the recoverable ECDSA helpers in the first version.
+#: Recoverable signatures require encoding both possible x-coordinate
+#: candidates of the ephemeral point, which is only enabled for these curves.
+RECOVERABLE_ECDSA_CURVES = (SECP256k1, NIST256p)
 
 
 class BadSignatureError(Exception):
@@ -520,6 +540,128 @@ class VerifyingKey(object):
             cls.from_public_point(pk.point, curve, hashfunc) for pk in pks
         ]
         return verifying_keys
+
+    @classmethod
+    def from_public_key_recovery_recoverable_with_digest(
+        cls,
+        signature,
+        digest,
+        curve,
+        hashfunc=sha1,
+        sigdecode=sigdecode_string_recoverable,
+        allow_truncate=False,
+    ):
+        """
+        Recover a single public key from a compact recoverable signature.
+
+        Unlike :func:`from_public_key_recovery_with_digest`, which returns
+        every candidate, the recoverable encoding carries a recovery ID that
+        uniquely identifies the public key of the signer, so this method
+        returns exactly one :class:`VerifyingKey`.
+
+        Only :data:`~ecdsa.curves.SECP256k1` and
+        :data:`~ecdsa.curves.NIST256p` are supported in the current version.
+
+        :param signature: byte string with the compact signature, encoded as
+            a single recovery ID byte followed by the fixed-length ``r`` and
+            ``s`` values, see
+            :func:`ecdsa.util.sigencode_string_recoverable`
+        :type signature: bytes-like object
+        :param digest: the hash value of the message signed by the signature
+        :type digest: bytes-like object
+        :param curve: the curve over which the signature was performed
+        :type curve: ~ecdsa.curves.Curve
+        :param hashfunc: the default hash function that will be used by the
+            returned key for verification, needs to implement the same
+            interface as hashlib.sha1
+        :type hashfunc: callable
+        :param sigdecode: decoder of the recoverable signature, needs to
+            return a tuple of ``r``, ``s`` and the recovery ID
+        :type sigdecode: callable
+        :param bool allow_truncate: if True, the provided digest can have a
+            bigger bit-size than the order of the curve, the extra bits (at
+            the end of the digest) will be truncated
+
+        :raises InvalidRecoveryError: if the signature is out of range, the
+            recovery ID does not select a valid point, or the recovered
+            public key does not validate the signature
+        :raises BadSignatureError: if the signature encoding is malformed
+
+        :return: the initialised VerifyingKey of the signer
+        :rtype: VerifyingKey
+        """
+        if isinstance(curve.curve, CurveEdTw):
+            raise ValueError("Method unsupported for Edwards curves")
+        if curve not in RECOVERABLE_ECDSA_CURVES:
+            raise ValueError(
+                "Recoverable signatures are supported only for {0}, "
+                "not for {1}".format(
+                    ", ".join(c.name for c in RECOVERABLE_ECDSA_CURVES),
+                    curve.name,
+                )
+            )
+        generator = curve.generator
+        try:
+            r, s, recovery_id = sigdecode(signature, generator.order())
+        except MalformedSignature as e:
+            raise BadSignatureError("Malformed formatting of signature", e)
+
+        digest = normalise_bytes(digest)
+        digest_as_number = _truncate_and_convert_digest(
+            digest, curve, allow_truncate
+        )
+        sig = ecdsa.Signature(r, s)
+        pk = sig.recover_public_key(digest_as_number, generator, recovery_id)
+        return cls.from_public_point(pk.point, curve, hashfunc)
+
+    @classmethod
+    def from_public_key_recovery_recoverable(
+        cls,
+        signature,
+        data,
+        curve,
+        hashfunc=sha1,
+        sigdecode=sigdecode_string_recoverable,
+        allow_truncate=True,
+    ):
+        """
+        Recover a single public key from a compact recoverable signature.
+
+        A convenience wrapper around
+        :func:`from_public_key_recovery_recoverable_with_digest` that hashes
+        ``data`` with ``hashfunc`` before recovery.
+
+        :param signature: byte string with the compact signature
+        :type signature: bytes-like object
+        :param data: the data to be hashed for signature verification
+        :type data: bytes-like object
+        :param curve: the curve over which the signature was performed
+        :type curve: ~ecdsa.curves.Curve
+        :param hashfunc: hash function used to hash ``data``, needs to
+            implement the same interface as hashlib.sha1
+        :type hashfunc: callable
+        :param sigdecode: decoder of the recoverable signature
+        :type sigdecode: callable
+        :param bool allow_truncate: if True, the provided hashfunc can
+            generate values larger than the bit size of the order of the
+            curve, the extra bits (at the end of the digest) will be
+            truncated
+
+        :return: the initialised VerifyingKey of the signer
+        :rtype: VerifyingKey
+        """
+        if isinstance(curve.curve, CurveEdTw):
+            raise ValueError("Method unsupported for Edwards curves")
+        data = normalise_bytes(data)
+        digest = hashfunc(data).digest()
+        return cls.from_public_key_recovery_recoverable_with_digest(
+            signature,
+            digest,
+            curve,
+            hashfunc=hashfunc,
+            sigdecode=sigdecode,
+            allow_truncate=allow_truncate,
+        )
 
     def to_string(self, encoding="raw"):
         """
@@ -1593,6 +1735,139 @@ class SigningKey(object):
         )
         r, s = self.sign_number(number, entropy, k)
         return sigencode(r, s, self.privkey.order)
+
+    def sign_digest_recoverable(
+        self,
+        digest,
+        hashfunc=None,
+        sigencode=sigencode_string_recoverable,
+        extra_entropy=b"",
+        allow_truncate=False,
+        low_s=True,
+    ):
+        """
+        Create a compact recoverable signature for the provided digest.
+
+        Uses the deterministic RFC6979 algorithm to select the nonce, so the
+        signature (including the recovery ID) is reproducible for a given
+        private key and digest.
+
+        Only :data:`~ecdsa.curves.SECP256k1` and
+        :data:`~ecdsa.curves.NIST256p` are supported in the current version.
+
+        :param digest: hash value that will be signed
+        :type digest: :term:`bytes-like object`
+        :param hashfunc: hash function used by the RFC6979 nonce generation,
+            defaults to the default hash function of this key
+        :type hashfunc: callable
+        :param sigencode: function used to encode the signature. It needs to
+            accept four parameters: ``r``, ``s``, the recovery ID and the
+            order of the curve. Defaults to the compact encoding, see
+            :func:`ecdsa.util.sigencode_string_recoverable`
+        :type sigencode: callable
+        :param extra_entropy: additional data fed into the RFC6979 generator
+        :type extra_entropy: :term:`bytes-like object`
+        :param bool allow_truncate: if True, a digest bigger than the curve
+            order is truncated following the same rule as
+            :func:`verify_digest`
+        :param bool low_s: if True, normalise the signature so that
+            ``s <= order / 2``. The recovery ID is adjusted at the same time
+            (its y-parity bit is flipped), it is not enough to only replace
+            ``s`` with ``order - s``.
+
+        :raises ValueError: if the curve of the key is not supported
+
+        :return: encoded recoverable signature
+        :rtype: bytes or sigencode function dependent type
+        """
+        if isinstance(self.curve.curve, CurveEdTw):
+            raise ValueError("Method unsupported for Edwards curves")
+        if self.curve not in RECOVERABLE_ECDSA_CURVES:
+            raise ValueError(
+                "Recoverable signatures are supported only for {0}, "
+                "not for {1}".format(
+                    ", ".join(c.name for c in RECOVERABLE_ECDSA_CURVES),
+                    self.curve.name,
+                )
+            )
+        hashfunc = hashfunc or self.default_hashfunc
+        digest = normalise_bytes(digest)
+        extra_entropy = normalise_bytes(extra_entropy)
+        number = _truncate_and_convert_digest(
+            digest, self.curve, allow_truncate
+        )
+
+        order = self.privkey.order
+        retry_gen = 0
+        while True:
+            k = rfc6979.generate_k(
+                order,
+                self.privkey.secret_multiplier,
+                hashfunc,
+                digest,
+                retry_gen=retry_gen,
+                extra_entropy=extra_entropy,
+            )
+            try:
+                r, s, recovery_id = self.privkey.sign_recoverable(number, k)
+                break
+            except RSZeroError:
+                retry_gen += 1
+
+        if low_s and s > order // 2:
+            # Negating s negates the ephemeral point R, which flips the
+            # parity of its y-coordinate; bit 0 of the recovery ID has to be
+            # adjusted together with s.
+            s = order - s
+            recovery_id ^= 1
+
+        return sigencode(r, s, recovery_id, order)
+
+    def sign_recoverable(
+        self,
+        data,
+        hashfunc=None,
+        sigencode=sigencode_string_recoverable,
+        extra_entropy=b"",
+        allow_truncate=True,
+        low_s=True,
+    ):
+        """
+        Create a compact recoverable signature over ``data``.
+
+        Hashes ``data`` with ``hashfunc`` and delegates to
+        :func:`sign_digest_recoverable`.
+
+        :param data: data that will be hashed and signed
+        :type data: :term:`bytes-like object`
+        :param hashfunc: hash function to use for hashing ``data`` and for
+            the RFC6979 nonce generation, defaults to the default hash
+            function of this key
+        :type hashfunc: callable
+        :param sigencode: function used to encode the signature
+        :type sigencode: callable
+        :param extra_entropy: additional data fed into the RFC6979 generator
+        :type extra_entropy: :term:`bytes-like object`
+        :param bool allow_truncate: if True, a digest bigger than the curve
+            order is truncated following the same rule as
+            :func:`verify_digest`
+        :param bool low_s: if True, normalise the signature to the low-``s``
+            form and adjust the recovery ID accordingly
+
+        :return: encoded recoverable signature
+        :rtype: bytes or sigencode function dependent type
+        """
+        hashfunc = hashfunc or self.default_hashfunc
+        data = normalise_bytes(data)
+        digest = hashfunc(data).digest()
+        return self.sign_digest_recoverable(
+            digest,
+            hashfunc=hashfunc,
+            sigencode=sigencode,
+            extra_entropy=extra_entropy,
+            allow_truncate=allow_truncate,
+            low_s=low_s,
+        )
 
     def sign_number(self, number, entropy=None, k=None):
         """

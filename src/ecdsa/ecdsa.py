@@ -80,6 +80,18 @@ class InvalidPointError(RuntimeError):
     pass
 
 
+class InvalidRecoveryError(RuntimeError):
+    """
+    Raised when public key recovery from a signature is not possible.
+
+    This happens when the provided recovery ID selects an ephemeral point
+    candidate that is not a valid point on the curve, or when the public
+    key derived from the candidate does not validate the signature.
+    """
+
+    pass
+
+
 class Signature(object):
     """
     ECDSA signature.
@@ -103,30 +115,119 @@ class Signature(object):
         :return: a pair of public keys that can validate the signature
         """
         curve = generator.curve()
-        n = generator.order()
         r = self.r
         s = self.s
         e = hash
         x = r
 
-        # Compute the curve point with x as x-coordinate
-        alpha = (
-            pow(x, 3, curve.p()) + (curve.a() * x) + curve.b()
-        ) % curve.p()
-        beta = numbertheory.square_root_mod_prime(alpha, curve.p())
-        y = beta if beta % 2 == 0 else curve.p() - beta
+        # r is the x-coordinate of the ephemeral point reduced modulo the
+        # order, x = r is the first (and for curves where p < n + p the only
+        # common) x-coordinate candidate. Both possible y parities are tried.
+        return [
+            self.recover_public_key(hash, generator, 0),
+            self.recover_public_key(hash, generator, 1),
+        ]
 
-        # Compute the public key
-        R1 = ellipticcurve.PointJacobi(curve, x, y, 1, n)
-        Q1 = numbertheory.inverse_mod(r, n) * (s * R1 + (-e % n) * generator)
-        Pk1 = Public_key(generator, Q1)
+    def recover_public_key(self, hash, generator, recovery_id):
+        """
+        Returns the public key selected by ``recovery_id``.
 
-        # And the second solution
-        R2 = ellipticcurve.PointJacobi(curve, x, -y, 1, n)
-        Q2 = numbertheory.inverse_mod(r, n) * (s * R2 + (-e % n) * generator)
-        Pk2 = Public_key(generator, Q2)
+        The recovery ID encodes both the parity of the ephemeral point
+        ``R = k * G`` and, for curves for which more than one x-coordinate
+        can reduce to ``r`` modulo the order, which x-coordinate candidate
+        to use:
 
-        return [Pk1, Pk2]
+        * bit 0: parity of the y-coordinate of R, 0 for even and 1 for odd
+        * bit 1: x-coordinate candidate, 0 for ``x = r`` and 1 for
+          ``x = r + order``
+
+        This is the convention used by the compact 65/64-byte signature
+        formats (as used in Bitcoin and Ethereum) and BIP-146.
+
+        :param int hash: signed hash
+        :param AbstractPoint generator: generator used in creation of the
+            signature
+        :param int recovery_id: recovery identifier, in range 0 to 3
+
+        :raises InvalidRecoveryError: when ``r`` or ``s`` is out of the
+            allowed range, the recovery ID is invalid, the selected
+            ephemeral point is not a valid point on the curve, or the
+            derived public key does not validate the signature
+
+        :rtype: Public_key
+        :return: the public key that validates the signature
+        """
+        n = generator.order()
+        curve = generator.curve()
+        p = curve.p()
+        r = self.r
+        s = self.s
+        e = hash
+
+        if not 1 <= r <= n - 1:
+            raise InvalidRecoveryError(
+                "The r parameter of the signature is out of range."
+            )
+        if not 1 <= s <= n - 1:
+            raise InvalidRecoveryError(
+                "The s parameter of the signature is out of range."
+            )
+        if recovery_id not in (0, 1, 2, 3):
+            raise InvalidRecoveryError(
+                "The recovery ID must be in range 0 to 3."
+            )
+
+        x_candidate = recovery_id >> 1
+        y_is_odd = recovery_id & 1
+
+        # bit 1 selects the x-coordinate candidate of R: r + j * n
+        x = r + x_candidate * n
+        if not 0 <= x < p:
+            raise InvalidRecoveryError(
+                "The recovery ID selects an x-coordinate candidate that "
+                "does not exist on the curve."
+            )
+
+        alpha = (pow(x, 3, p) + curve.a() * x + curve.b()) % p
+        try:
+            beta = numbertheory.square_root_mod_prime(alpha, p)
+        except numbertheory.SquareRootError:
+            raise InvalidRecoveryError(
+                "The recovery ID selects a point that is not on the curve."
+            )
+        # square_root_mod_prime returns one of the two roots; select the
+        # root with the parity requested by bit 0 of the recovery ID.
+        if (beta & 1) != y_is_odd:
+            beta = p - beta
+
+        R = ellipticcurve.PointJacobi(curve, x, beta, 1, n)
+        if not curve.contains_point(R.x(), R.y()):
+            raise InvalidRecoveryError(
+                "The recovery ID selects a point that is not on the curve."
+            )
+
+        # Q = r^-1 * (s * R - e * G)
+        Q = numbertheory.inverse_mod(r, n) * (
+            s * R + (-e % n) * generator
+        )
+        if Q == ellipticcurve.INFINITY:
+            raise InvalidRecoveryError(
+                "The recovered public key is the point at infinity."
+            )
+
+        try:
+            public_key = Public_key(generator, Q)
+            if not public_key.verifies(e, self):
+                raise InvalidRecoveryError(
+                    "The recovered public key does not validate the "
+                    "signature."
+                )
+        except InvalidPointError:
+            raise InvalidRecoveryError(
+                "The recovered public key is not a valid public key for the "
+                "generator of the curve."
+            )
+        return public_key
 
 
 class Public_key(object):
@@ -246,6 +347,24 @@ class Private_key(object):
         random value k is in order.
         """
 
+        r, s, _ = self.sign_recoverable(hash, random_k)
+        return Signature(r, s)
+
+    def sign_recoverable(self, hash, random_k):
+        """Return a recoverable signature for the provided hash, using the
+        provided random nonce.
+
+        In addition to the ``r`` and ``s`` parameters of a regular ECDSA
+        signature, it returns the :term:`recovery ID` that selects the actual
+        ephemeral point ``R = random_k * G`` (and hence the actual public
+        key) among the candidates considered during public key recovery.
+
+        See :func:`Signature.recover_public_key` for the meaning of the
+        recovery ID.
+
+        :rtype: tuple(int, int, int)
+        :return: ``r``, ``s`` and the recovery ID
+        """
         G = self.public_key.generator
         n = G.order()
         k = random_k % n
@@ -258,7 +377,8 @@ class Private_key(object):
             p1 = kt * G
         else:
             p1 = ks * G
-        r = p1.x() % n
+        x = p1.x()
+        r = x % n
         if r == 0:
             raise RSZeroError("amazingly unlucky random number r")
         s = (
@@ -267,7 +387,14 @@ class Private_key(object):
         ) % n
         if s == 0:
             raise RSZeroError("amazingly unlucky random number s")
-        return Signature(r, s)
+
+        # The x-coordinate of R can exceed the order, so the reduction
+        # r = x(R) mod n may lose a multiple of n; the multiple is the
+        # x-coordinate candidate index j and it occupies bit 1.
+        recovery_id = ((x - r) // n) << 1
+        # bit 0 records the parity of the y-coordinate of R.
+        recovery_id |= p1.y() & 1
+        return r, s, recovery_id
 
 
 def int_to_string(x):  # pragma: no cover

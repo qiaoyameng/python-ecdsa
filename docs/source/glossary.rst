@@ -56,6 +56,23 @@ Glossary
        first byte of the encoding will be equal to 0x06 or 0x7. Hybrid
        encoding of NIST256p public key will be 65 bytes long.
 
+   recovery ID
+       A single byte, small integer that, together with an ECDSA signature
+       ``r`` and ``s`` and the signed digest, identifies the public key of
+       the signer. Bit 0 selects the parity of the y coordinate of the
+       ephemeral point ``R = k * G`` (0 for even, 1 for odd) and bit 1
+       selects the x-coordinate candidate (0 for ``x = r`` and 1 for
+       ``x = r + order``). When a signature is normalised to the low-``s``
+       form, bit 0 has to be flipped at the same time as ``s`` is replaced
+       by ``order - s``.
+
+   recoverable encoding
+       Compact, :term:`raw encoding`-like encoding of an ECDSA signature
+       that additionally carries the :term:`recovery ID`. It is a
+       concatenation of the single recovery ID byte, the ``r`` integer and
+       the ``s`` integer, each of them encoded as a fixed length, big-endian
+       byte string. For 256-bit curves it's 65 bytes long.
+
    PEM
        The acronym stands for Privacy Enhanced Mail, but currently it is used
        primarily as the way to encode :term:`DER` objects into text that can
