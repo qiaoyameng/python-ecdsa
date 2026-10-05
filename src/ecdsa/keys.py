@@ -626,6 +626,61 @@ class VerifyingKey(object):
             self.to_string(),
         )
 
+    def _eddsa_verify(self, data, signature, mode, context):
+        """Dispatch an EdDSA verification to the curve implementation.
+
+        Normalises the Ed25519 `mode`/`context` selection so that an
+        invalid mode or context is rejected instead of silently verifying
+        the signature as pure Ed25519.
+        """
+        if self.curve is Ed25519:
+            if mode is None:
+                mode = eddsa.ED25519_MODE_PURE
+            return self.pubkey.verify(
+                data, signature, mode=mode, context=context
+            )
+        if mode is not None or context is not None:
+            raise ValueError(
+                "Ed25519 modes and contexts are not supported with Ed448"
+            )
+        return self.pubkey.verify(data, signature)
+
+    def verify_prehashed(self, signature, data, context=None):
+        """
+        Verify an Ed25519ph signature over an original message.
+
+        The provided `data` is prehashed once with SHA-512 (as required by
+        Ed25519ph in RFC 8032) and then verified. If you already hold the
+        64 byte SHA-512 digest, verify it through :meth:`verify` with
+        ``mode="prehashed"`` instead.
+
+        :param signature: the raw Ed25519 signature (64 bytes)
+        :param data: original message whose SHA-512 digest was signed
+        :type data: :term:`bytes-like object`
+        :param context: Ed25519ph domain separation string used for signing,
+            a byte string of at most 255 bytes
+        :type context: :term:`bytes-like object`
+
+        :raises BadSignatureError: if the signature is invalid or malformed
+
+        :return: True if the verification was successful
+        :rtype: bool
+        """
+        if self.curve is not Ed25519:
+            raise ValueError("Ed25519ph is only supported with Ed25519")
+        signature = normalise_bytes(signature)
+        data = normalise_bytes(data)
+        digest = eddsa.prehash_ed25519(data)
+        try:
+            return self.pubkey.verify(
+                digest,
+                signature,
+                mode=eddsa.ED25519_MODE_PREHASHED,
+                context=context,
+            )
+        except (ValueError, MalformedPointError) as e:
+            raise BadSignatureError("Signature verification failed", e)
+
     def verify(
         self,
         signature,
@@ -633,6 +688,8 @@ class VerifyingKey(object):
         hashfunc=None,
         sigdecode=sigdecode_string,
         allow_truncate=True,
+        mode=None,
+        context=None,
     ):
         """
         Verify a signature made over provided data.
@@ -664,6 +721,16 @@ class VerifyingKey(object):
             the end of the digest) will be truncated. Use it when verifying
             SHA-384 output using NIST256p or in similar situations. Defaults to
             True.
+        :param str mode: Ed25519 verification mode, one of ``"pure"`` (the
+            default), ``"context"`` for Ed25519ctx or ``"prehashed"`` for
+            Ed25519ph (RFC 8032). In the ``"prehashed"`` mode `data` must be
+            an already computed 64 byte SHA-512 digest; use
+            :meth:`verify_prehashed` to verify an original message. Ignored
+            for other curves.
+        :param context: Ed25519ctx/Ed25519ph domain separation string, a
+            byte string of at most 255 bytes. Must match the context used
+            for signing and stay empty for pure Ed25519.
+        :type context: :term:`bytes-like object`
 
         :raises BadSignatureError: if the signature is invalid or malformed
 
@@ -676,7 +743,7 @@ class VerifyingKey(object):
         if isinstance(self.curve.curve, CurveEdTw):
             signature = normalise_bytes(signature)
             try:
-                return self.pubkey.verify(data, signature)
+                return self._eddsa_verify(data, signature, mode, context)
             except (ValueError, MalformedPointError) as e:
                 raise BadSignatureError("Signature verification failed", e)
 
@@ -1312,12 +1379,58 @@ class SigningKey(object):
         """
         return self.verifying_key
 
+    def _eddsa_sign(self, data, mode, context):
+        """Dispatch an EdDSA signing request to the curve implementation.
+
+        Normalises the Ed25519 `mode`/`context` selection before signing so
+        that invalid parameters are rejected instead of silently falling
+        back to pure Ed25519.
+        """
+        if self.curve is Ed25519:
+            if mode is None:
+                mode = eddsa.ED25519_MODE_PURE
+            return self.privkey.sign(data, mode=mode, context=context)
+        # Ed448 does not support the Ed25519 modes/contexts.
+        if mode is not None or context is not None:
+            raise ValueError(
+                "Ed25519 modes and contexts are not supported with Ed448"
+            )
+        return self.privkey.sign(data)
+
+    def sign_prehashed(self, data, context=None):
+        """
+        Create an Ed25519ph signature over an original message.
+
+        The provided `data` is prehashed once with SHA-512 (as required by
+        Ed25519ph in RFC 8032) and then signed. Use this entry to avoid
+        hashing the message twice; if you already hold the 64 byte SHA-512
+        digest, sign it through :meth:`sign` with ``mode="prehashed"``.
+
+        :param data: original message that will be prehashed and signed
+        :type data: :term:`bytes-like object`
+        :param context: optional Ed25519ph domain separation string, a byte
+            string of at most 255 bytes
+        :type context: :term:`bytes-like object`
+
+        :raises ValueError: if the key is not an Ed25519 key or the context
+            is invalid
+
+        :return: raw Ed25519 signature (64 bytes)
+        :rtype: bytes
+        """
+        if self.curve is not Ed25519:
+            raise ValueError("Ed25519ph is only supported with Ed25519")
+        data = normalise_bytes(data)
+        return self.privkey.sign_prehashed(data, context=context)
+
     def sign_deterministic(
         self,
         data,
         hashfunc=None,
         sigencode=sigencode_string,
         extra_entropy=b"",
+        mode=None,
+        context=None,
     ):
         """
         Create signature over data.
@@ -1354,6 +1467,13 @@ class SigningKey(object):
             number generator used in the RFC6979 process. Entirely optional.
             Ignored with EdDSA.
         :type extra_entropy: :term:`bytes-like object`
+        :param str mode: Ed25519 signing mode, one of ``"pure"`` (the
+            default), ``"context"`` for Ed25519ctx or ``"prehashed"`` for
+            Ed25519ph, as defined in RFC 8032. Ignored for other curves.
+        :param context: Ed25519ctx/Ed25519ph domain separation string, a
+            byte string of at most 255 bytes. Ignored (and must be empty)
+            for pure Ed25519.
+        :type context: :term:`bytes-like object`
 
         :return: encoded signature over `data`
         :rtype: bytes or sigencode function dependent type
@@ -1362,7 +1482,7 @@ class SigningKey(object):
         data = normalise_bytes(data)
 
         if isinstance(self.curve.curve, CurveEdTw):
-            return self.privkey.sign(data)
+            return self._eddsa_sign(data, mode, context)
 
         extra_entropy = normalise_bytes(extra_entropy)
         digest = hashfunc(data).digest()
@@ -1462,6 +1582,8 @@ class SigningKey(object):
         sigencode=sigencode_string,
         k=None,
         allow_truncate=True,
+        mode=None,
+        context=None,
     ):
         """
         Create signature over data.
@@ -1519,6 +1641,16 @@ class SigningKey(object):
             SHA-384 output using NIST256p or in similar situations. True by
             default.
             Ignored for EdDSA.
+        :param str mode: Ed25519 signing mode, one of ``"pure"`` (the
+            default), ``"context"`` for Ed25519ctx or ``"prehashed"`` for
+            Ed25519ph (RFC 8032). In the ``"prehashed"`` mode `data` must be
+            an already computed 64 byte SHA-512 digest; use
+            :meth:`sign_prehashed` to sign an original message. Ignored for
+            other curves.
+        :param context: Ed25519ctx/Ed25519ph domain separation string, a
+            byte string of at most 255 bytes. Must stay empty for pure
+            Ed25519.
+        :type context: :term:`bytes-like object`
 
         :raises RSZeroError: in the unlikely event when *r* parameter or
             *s* parameter of the created signature is equal 0, as that would
@@ -1532,7 +1664,7 @@ class SigningKey(object):
         hashfunc = hashfunc or self.default_hashfunc
         data = normalise_bytes(data)
         if isinstance(self.curve.curve, CurveEdTw):
-            return self.sign_deterministic(data)
+            return self._eddsa_sign(data, mode, context)
         h = hashfunc(data).digest()
         return self.sign_digest(h, entropy, sigencode, k, allow_truncate)
 

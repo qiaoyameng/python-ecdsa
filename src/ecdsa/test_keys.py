@@ -515,6 +515,167 @@ class TestVerifyingKeyFromDer(unittest.TestCase):
         self.assertTrue(vk.verify(sig, data))
 
 
+class TestEd25519Modes(unittest.TestCase):
+    """RFC 8032 Ed25519ctx and Ed25519ph through the high level API."""
+
+    priv = bytes.fromhex(
+        "4ccd089b28ff96da9db6c346ec114e0f"
+        "5b8a319f35aba624da8cf6ed4fb8a6fb"
+    )
+    pub = bytes.fromhex(
+        "3d4017c3e843895a92b70aa74d1b7ebc"
+        "9c982ccf2ec4968cc0cd55f12af4660c"
+    )
+
+    def setUp(self):
+        self.sk = SigningKey.from_string(self.priv, Ed25519)
+        self.vk = VerifyingKey.from_string(self.pub, Ed25519)
+
+    def test_ed25519ctx_known_vector(self):
+        # RFC 8032 section 7.1, message 0x72, context 0xf0.
+        sig = bytes.fromhex(
+            "8164c963dc59171413bbf2a4429598f1"
+            "f384354f6f52e7145658bc19dd6fde98"
+            "bd138d49d6093c34c0f4731b56e47500"
+            "ec21079be37cff7ad9f57d10227e4202"
+        )
+        self.assertEqual(
+            self.sk.sign(b"\x72", mode="context", context=b"\xf0"), sig
+        )
+        self.assertTrue(
+            self.vk.verify(sig, b"\x72", mode="context", context=b"\xf0")
+        )
+
+    def test_ed25519ph_known_vector(self):
+        sk = SigningKey.from_string(
+            bytes.fromhex(
+                "833fe62409237b9d62ec77587520911e"
+                "9a759cec1d19755b7da901b96dca3d42"
+            ),
+            Ed25519,
+        )
+        vk = VerifyingKey.from_string(
+            bytes.fromhex(
+                "ec172b93ad5e563bf4932c70e1245034"
+                "c35467ef2efd4d64ebf819683467e2bf"
+            ),
+            Ed25519,
+        )
+        sig = bytes.fromhex(
+            "98a70222f0b8121aa9d30f813d683f80"
+            "9e462b469c7ff87639499bb94e6dae4"
+            "131f85042463c2a355a2003d062adf5a"
+            "aa10b8c61e636062aaad11c2a26083406"
+        )
+        # Original message entry performs a single prehash.
+        self.assertEqual(sk.sign_prehashed(b"abc"), sig)
+        self.assertTrue(vk.verify_prehashed(sig, b"abc"))
+        # Already prehashed entry is accepted and not rehashed.
+        digest = hashlib.sha512(b"abc").digest()
+        self.assertEqual(sk.sign(digest, mode="prehashed"), sig)
+        self.assertTrue(vk.verify(sig, digest, mode="prehashed"))
+
+    def test_pure_output_unchanged(self):
+        expected = bytes.fromhex(
+            "92a009a9f0d4cab8720e820b5f642540"
+            "a2b27b5416503f8fb3762223ebdb69da"
+            "085ac1e43e15996e458f3613d0f11d8c"
+            "387b2eaeb4302aeeb00d291612bb0c00"
+        )
+        self.assertEqual(self.sk.sign(b"\x72"), expected)
+        self.assertTrue(self.vk.verify(expected, b"\x72"))
+
+    def test_empty_context_differs_from_pure(self):
+        data = b"some data"
+        self.assertNotEqual(
+            self.sk.sign(data),
+            self.sk.sign(data, mode="context", context=b""),
+        )
+        self.assertTrue(
+            self.vk.verify(
+                self.sk.sign(data, mode="context"),
+                data,
+                mode="context",
+            )
+        )
+
+    def test_maximum_context_length(self):
+        context = b"\x01" * 255
+        sig = self.sk.sign(b"data", mode="context", context=context)
+        self.assertTrue(
+            self.vk.verify(sig, b"data", mode="context", context=context)
+        )
+        with self.assertRaises(ValueError):
+            self.sk.sign(b"data", mode="context", context=b"\x01" * 256)
+
+    def test_same_message_does_not_cross_verify(self):
+        data = b"same message for every mode"
+        digest = hashlib.sha512(data).digest()
+
+        pure = self.sk.sign(data)
+        ctx = self.sk.sign(data, mode="context", context=b"dom")
+        ph = self.sk.sign(digest, mode="prehashed", context=b"dom")
+
+        self.assertTrue(self.vk.verify(pure, data))
+        self.assertTrue(
+            self.vk.verify(ctx, data, mode="context", context=b"dom")
+        )
+        self.assertTrue(
+            self.vk.verify(ph, digest, mode="prehashed", context=b"dom")
+        )
+
+        # Wrong mode rejects the signature instead of accepting it.
+        with self.assertRaises(BadSignatureError):
+            self.vk.verify(ctx, data)
+        with self.assertRaises(BadSignatureError):
+            self.vk.verify(pure, data, mode="context", context=b"dom")
+        with self.assertRaises(BadSignatureError):
+            self.vk.verify(pure, digest, mode="prehashed", context=b"dom")
+        with self.assertRaises(BadSignatureError):
+            self.vk.verify(ph, data)
+        # A different context is also rejected.
+        with self.assertRaises(BadSignatureError):
+            self.vk.verify(ph, digest, mode="prehashed", context=b"other")
+
+    def test_ph_original_and_digest_are_equivalent(self):
+        data = b"streamed original message"
+        digest = hashlib.sha512(data).digest()
+        via_message = self.sk.sign_prehashed(data, context=b"c")
+        via_digest = self.sk.sign(digest, mode="prehashed", context=b"c")
+        self.assertEqual(via_message, via_digest)
+        self.assertTrue(
+            self.vk.verify_prehashed(via_message, data, context=b"c")
+        )
+
+    def test_bad_digest_length_rejected(self):
+        with self.assertRaises(ValueError):
+            self.sk.sign(b"too short", mode="prehashed")
+        with self.assertRaises(BadSignatureError):
+            self.vk.verify(b"\x00" * 64, b"too short", mode="prehashed")
+
+    def test_bad_arguments_rejected_before_signing(self):
+        with self.assertRaises(ValueError):
+            self.sk.sign(b"data", mode="unknown")
+        with self.assertRaises(ValueError):
+            self.sk.sign(b"data", context=b"forbidden in pure mode")
+        with self.assertRaises(TypeError):
+            self.sk.sign(b"data", mode="context", context="not bytes")
+        with self.assertRaises(ValueError):
+            self.sk.sign_prehashed(b"data", context=b"\x00" * 256)
+        with self.assertRaises(BadSignatureError):
+            self.vk.verify(b"\x00" * 64, b"data", mode="unknown")
+
+    def test_ed448_rejects_ed25519_mode_and_context(self):
+        sk = SigningKey.generate(Ed448)
+        vk = sk.verifying_key
+        with self.assertRaises(ValueError):
+            sk.sign(b"data", mode="context", context=b"c")
+        with self.assertRaises(ValueError):
+            sk.sign_prehashed(b"data")
+        with self.assertRaises(BadSignatureError):
+            vk.verify(b"\x00" * 114, b"data", mode="context", context=b"c")
+
+
 class TestSigningKey(unittest.TestCase):
     """
     Verify that ecdsa.keys.SigningKey.from_der() can be used with

@@ -1,3 +1,16 @@
+* Unreleased
+
+New API:
+* Support for the Ed25519ctx and Ed25519ph signature modes from RFC 8032.
+  Select them with the ``mode`` (``"context"`` or ``"prehashed"``) and
+  ``context`` arguments of ``SigningKey.sign()``,
+  ``SigningKey.sign_deterministic()`` and ``VerifyingKey.verify()``.
+  ``SigningKey.sign_prehashed()`` and
+  ``VerifyingKey.verify_prehashed()`` sign and verify an original message
+  (performing the SHA-512 prehash once); passing an already computed
+  64 byte digest through ``mode="prehashed"`` avoids a second hash. Pure
+  Ed25519 signatures are unchanged.
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:

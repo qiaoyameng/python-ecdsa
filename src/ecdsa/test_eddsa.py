@@ -1122,3 +1122,186 @@ def test_vectors(generator, private_key, public_key, message, signature):
     assert gen_sig == signature
 
     assert ver_key.verify(message, signature)
+
+
+# Test vectors for Ed25519ctx (RFC 8032, section 7.1) and Ed25519ph
+# (section 7.3). Signatures were cross-checked against the published RFC
+# values.
+ED25519CTX_VECTORS = [
+    # Section 7.1, TEST 1: empty message, empty context. Even an empty
+    # context applies dom2(), so this differs from pure Ed25519.
+    (
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "",
+        "",
+        "d210e902eaab7f4d503cba60ba9fd5a2"
+        "1ae7e9d4c569eb4d73ebceee7cd757e3"
+        "d77985bb05b09a3e517f486e2a0116e1"
+        "da875acc8de38719fd09061a81a1df02",
+    ),
+    # Section 7.1, TEST 2: one byte message, context f0.
+    (
+        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "72",
+        "f0",
+        "8164c963dc59171413bbf2a4429598f1"
+        "f384354f6f52e7145658bc19dd6fde98"
+        "bd138d49d6093c34c0f4731b56e47500"
+        "ec21079be37cff7ad9f57d10227e4202",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "private_key,public_key,message,context,signature", ED25519CTX_VECTORS
+)
+def test_ed25519ctx_vectors(
+    private_key, public_key, message, context, signature
+):
+    private_key = a2b_hex(private_key)
+    public_key = a2b_hex(public_key)
+    message = a2b_hex(message)
+    context = a2b_hex(context)
+    signature = a2b_hex(signature)
+
+    signer = PrivateKey(generator_ed25519, private_key)
+    verifier = PublicKey(generator_ed25519, public_key)
+
+    produced = signer.sign(message, mode="context", context=context)
+    assert produced == signature
+    assert verifier.verify(
+        message, signature, mode="context", context=context
+    )
+
+
+# RFC 8032, section 7.3, TEST 1: SHA-512("abc") signed with Ed25519ph.
+ED25519PH_VECTOR = (
+    "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42",
+    "ec172b93ad5e563bf4932c70e1245034c35467ef2efd4d64ebf819683467e2bf",
+    "98a70222f0b8121aa9d30f813d683f809e462b469c7ff87639499bb94e6dae4"
+    "131f85042463c2a355a2003d062adf5aaa10b8c61e636062aaad11c2a26083406",
+)
+
+
+def test_ed25519ph_vector():
+    private_hex, public_hex, signature_hex = ED25519PH_VECTOR
+    private_key = a2b_hex(private_hex)
+    public_key = a2b_hex(public_hex)
+    signature = a2b_hex(signature_hex)
+
+    signer = PrivateKey(generator_ed25519, private_key)
+    verifier = PublicKey(generator_ed25519, public_key)
+
+    message = b"abc"
+    digest = hashlib.sha512(message).digest()
+
+    # Original message entry performs the single prehash.
+    assert signer.sign_prehashed(message) == signature
+    # Already-prehashed entry must not hash the digest again.
+    assert signer.sign(digest, mode="prehashed") == signature
+    assert verifier.verify(digest, signature, mode="prehashed")
+
+
+def test_ed25519ph_prehashed_digest_length_is_validated():
+    private_key = a2b_hex(ED25519PH_VECTOR[0])
+    public_key = a2b_hex(ED25519PH_VECTOR[1])
+    signer = PrivateKey(generator_ed25519, private_key)
+    verifier = PublicKey(generator_ed25519, public_key)
+
+    with pytest.raises(ValueError):
+        signer.sign(b"not-a-64-byte-digest-xxx", mode="prehashed")
+    with pytest.raises(ValueError):
+        verifier.verify(
+            b"not-a-64-byte-digest-xxx",
+            b"\x00" * 64,
+            mode="prehashed",
+        )
+
+
+def test_ed25519_maximum_context_length():
+    private_key = a2b_hex(ED25519CTX_VECTORS[1][0])
+    public_key = a2b_hex(ED25519CTX_VECTORS[1][1])
+    signer = PrivateKey(generator_ed25519, private_key)
+    verifier = PublicKey(generator_ed25519, public_key)
+
+    context = b"\x01" * 255
+    message = a2b_hex("72")
+
+    signature = signer.sign(message, mode="context", context=context)
+    assert verifier.verify(
+        message, signature, mode="context", context=context
+    )
+
+    with pytest.raises(ValueError):
+        signer.sign(message, mode="context", context=b"\x01" * 256)
+
+
+def test_ed25519_empty_context_is_domain_separated_from_pure():
+    # An explicitly empty context still applies dom2() (F=0), so it must
+    # not produce the pure signature.
+    private_key = a2b_hex(ED25519CTX_VECTORS[1][0])
+    public_key = a2b_hex(ED25519CTX_VECTORS[1][1])
+    signer = PrivateKey(generator_ed25519, private_key)
+    verifier = PublicKey(generator_ed25519, public_key)
+    message = a2b_hex("72")
+
+    pure_signature = signer.sign(message)
+    ctx_signature = signer.sign(
+        message, mode="context", context=b""
+    )
+    assert ctx_signature != pure_signature
+    assert verifier.verify(message, ctx_signature, mode="context")
+
+
+def test_ed25519_modes_do_not_cross_verify():
+    private_key = a2b_hex(ED25519CTX_VECTORS[1][0])
+    public_key = a2b_hex(ED25519CTX_VECTORS[1][1])
+    signer = PrivateKey(generator_ed25519, private_key)
+    verifier = PublicKey(generator_ed25519, public_key)
+
+    message = b"the same message across all modes"
+    digest = hashlib.sha512(message).digest()
+
+    pure = signer.sign(message)
+    ctx = signer.sign(message, mode="context", context=b"context")
+    ph = signer.sign(digest, mode="prehashed", context=b"context")
+
+    assert len({bytes(pure), bytes(ctx), bytes(ph)}) == 3
+
+    # A signature valid in one mode is invalid in the other modes.
+    with pytest.raises(ValueError):
+        verifier.verify(message, ctx)
+    with pytest.raises(ValueError):
+        verifier.verify(message, pure, mode="context", context=b"context")
+    with pytest.raises(ValueError):
+        verifier.verify(digest, pure, mode="prehashed", context=b"context")
+    with pytest.raises(ValueError):
+        verifier.verify(message, ph)
+    # The ph signature is also invalid when the context differs.
+    with pytest.raises(ValueError):
+        verifier.verify(digest, ph, mode="prehashed", context=b"other")
+
+    # Each signature verifies in its own mode/context.
+    assert verifier.verify(message, pure)
+    assert verifier.verify(message, ctx, mode="context", context=b"context")
+    assert verifier.verify(digest, ph, mode="prehashed", context=b"context")
+
+
+def test_ed25519_invalid_mode_and_context_rejected_before_signing():
+    private_key = a2b_hex(ED25519CTX_VECTORS[1][0])
+    signer = PrivateKey(generator_ed25519, private_key)
+    public_key = a2b_hex(ED25519CTX_VECTORS[1][1])
+    verifier = PublicKey(generator_ed25519, public_key)
+
+    with pytest.raises(ValueError):
+        signer.sign(b"", mode="bogus")
+    with pytest.raises(ValueError):
+        signer.sign(b"", mode="pure", context=b"non-empty")
+    with pytest.raises(ValueError):
+        signer.sign_prehashed(b"", context=b"\x00" * 256)
+    with pytest.raises(TypeError):
+        signer.sign(b"", mode="context", context="not-bytes")
+    with pytest.raises(ValueError):
+        verifier.verify(b"", b"\x00" * 64, mode="bogus")
