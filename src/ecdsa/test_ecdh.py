@@ -23,11 +23,15 @@ from .curves import (
 from .curves import curves
 from .ecdh import (
     ECDH,
+    HKDFContext,
+    INITIATOR,
+    RESPONDER,
     InvalidCurveError,
     InvalidSharedSecretError,
     NoKeyError,
     NoCurveError,
 )
+from .hkdf import hkdf, HKDFError
 from .keys import SigningKey, VerifyingKey
 from .ellipticcurve import CurveEdTw
 
@@ -447,3 +451,292 @@ def test_ecdh_with_openssl(vcurve):
 
     assert ssl_secret1 == ssl_secret2
     assert secret1 == ssl_secret1
+
+
+# NIST P-521 CAVP vector whose shared x coordinate starts with a zero
+# octet ("005fc704..."). It verifies that the fixed width encoding used
+# as HKDF input preserves leading zero octets of the shared secret.
+LEADING_ZERO_VECTOR = dict(
+    curve=NIST521p,
+    privatekey=(
+        "017eecc07ab4b329068fba65e56a1f8890aa935e57134ae0ffcce802735151"
+        "f4eac6564f6ee9974c5e6887a1fefee5743ae2241bfeb95d5ce31ddcb6f9ed"
+        "b4d6fc47"
+    ),
+    pubkey=(
+        "00685a48e86c79f0f0875f7bc18d25eb5fc8c0b07e5da4f4370f3a949034085433"
+        "4b1e1b87fa395464c60626124a4e70d0f785601d37c09870ebf176666877a2046d"
+        "01ba52c56fc8776d9e8f5db4f0cc27636d0b741bbe05400697942e80b739884a83"
+        "bde99e0f6716939e632bc8986fa18dccd443a348b6c3e522497955a4f3c302f676"
+    ),
+    sharedsecret=(
+        "005fc70477c3e63bc3954bd0df3ea0d1f41ee21746ed95fc5e1fdf90930d5e1366"
+        "72d72cc770742d1711c3c3a4c334a0ad9759436a4d3c5bf6e74b9578fac148c831"
+    ),
+)
+
+
+def _ecdh_pair(curve, initiator_secexp=None, responder_secexp=None):
+    """Build two ECDH instances that agree on each other's public key."""
+    initiator = ECDH(curve=curve)
+    if initiator_secexp is None:
+        initiator.generate_private_key()
+    else:
+        initiator.load_private_key(
+            SigningKey.from_secret_exponent(
+                initiator_secexp, curve=curve
+            )
+        )
+
+    responder = ECDH(curve=curve)
+    if responder_secexp is None:
+        responder.generate_private_key()
+    else:
+        responder.load_private_key(
+            SigningKey.from_secret_exponent(
+                responder_secexp, curve=curve
+            )
+        )
+
+    initiator.load_received_public_key(responder.get_public_key())
+    responder.load_received_public_key(initiator.get_public_key())
+    return initiator, responder
+
+
+def test_generate_session_key_raw_info_interop():
+    initiator, responder = _ecdh_pair(NIST256p, 0x42424242)
+
+    salt = b"\x11" * 16
+    info = b"application-v1/handshake"
+
+    key_initiator = initiator.generate_session_key(
+        32, salt=salt, info=info, hash_name="sha256"
+    )
+    key_responder = responder.generate_session_key(
+        32, salt=salt, info=info, hash_name="sha256"
+    )
+
+    assert key_initiator == key_responder
+    assert len(key_initiator) == 32
+
+
+def test_generate_session_key_leading_zero_shared_secret_interop():
+    vector = LEADING_ZERO_VECTOR
+    shared_secret = unhexlify(vector["sharedsecret"])
+    # sanity check of the property this vector is selected for
+    assert shared_secret[0:1] == b"\x00"
+    assert len(shared_secret) == 66
+
+    initiator = ECDH(curve=vector["curve"])
+    initiator.load_private_key_bytes(unhexlify(vector["privatekey"]))
+    initiator.load_received_public_key_bytes(unhexlify(vector["pubkey"]))
+
+    assert initiator.generate_sharedsecret_bytes() == shared_secret
+
+    salt = b"salt for leading zero test"
+    info = b"protocol-v1"
+
+    # the ECDH entry point must feed the fixed width shared secret
+    # (leading zero octet preserved) to HKDF
+    derived = initiator.generate_session_key(
+        48, salt=salt, info=info, hash_name="sha256"
+    )
+    reference = hkdf(shared_secret, 48, salt=salt, info=info)
+    assert derived == reference
+
+    # silently trimming leading zero octets must change the output
+    trimmed = hkdf(shared_secret.lstrip(b"\x00"), 48, salt=salt, info=info)
+    assert trimmed != derived
+
+
+def test_session_key_with_structured_context_is_symmetric():
+    initiator, responder = _ecdh_pair(NIST256p, 0x42424242)
+
+    context_initiator = HKDFContext("test-protocol-v1", INITIATOR)
+    context_responder = HKDFContext("test-protocol-v1", RESPONDER)
+
+    key_initiator = initiator.generate_session_key(
+        32,
+        salt=b"\x22" * 16,
+        context=context_initiator,
+        hash_name="sha384",
+    )
+    key_responder = responder.generate_session_key(
+        32,
+        salt=b"\x22" * 16,
+        context=context_responder,
+        hash_name="sha384",
+    )
+
+    assert key_initiator == key_responder
+
+
+def test_structured_context_no_silent_role_swap():
+    initiator, responder = _ecdh_pair(NIST256p, 0x42424242)
+
+    key_initiator = initiator.generate_session_key(
+        32, context=HKDFContext("proto", INITIATOR)
+    )
+    # responder pretending to be initiator (and vice versa) must not
+    # derive the same key - public keys must not be silently sorted
+    key_responder_as_initiator = responder.generate_session_key(
+        32, context=HKDFContext("proto", INITIATOR)
+    )
+    key_responder = responder.generate_session_key(
+        32, context=HKDFContext("proto", RESPONDER)
+    )
+
+    assert key_responder == key_initiator
+    assert key_responder_as_initiator != key_initiator
+
+
+def test_structured_context_different_protocol_binds_key():
+    initiator, responder = _ecdh_pair(NIST256p, 0x42424242)
+
+    key_a = initiator.generate_session_key(
+        32, context=HKDFContext("protocol-a", INITIATOR)
+    )
+    key_b = initiator.generate_session_key(
+        32, context=HKDFContext("protocol-b", INITIATOR)
+    )
+    assert key_a != key_b
+
+
+def test_structured_context_info_encoding_is_unambiguous():
+    initiator, responder = _ecdh_pair(NIST256p, 0x42424242)
+
+    context = HKDFContext("proto", INITIATOR)
+    info = context.to_info(
+        curve=NIST256p,
+        initiator_public_key=initiator.get_public_key(),
+        responder_public_key=responder.get_public_key(),
+    )
+
+    # every item is length prefixed, so changing a protocol name to a
+    # longer one can't collide with following fields
+    other = HKDFContext("proto\x00extra", INITIATOR)
+    other_info = other.to_info(
+        curve=NIST256p,
+        initiator_public_key=initiator.get_public_key(),
+        responder_public_key=responder.get_public_key(),
+    )
+    assert info != other_info
+
+    # swapping the keys changes the encoding (role order is fixed)
+    swapped = context.to_info(
+        curve=NIST256p,
+        initiator_public_key=responder.get_public_key(),
+        responder_public_key=initiator.get_public_key(),
+    )
+    assert swapped != info
+
+    # uncompressed SEC1 encoding of P-256 points is 65 bytes, so both
+    # key fields must be present as full length blobs in the info
+    assert initiator.get_public_key().to_string("uncompressed") in info
+    assert responder.get_public_key().to_string("uncompressed") in info
+
+
+def test_structured_context_rejects_invalid_role():
+    with pytest.raises(HKDFError):
+        HKDFContext("proto", b"server")
+
+
+def test_structured_context_rejects_empty_protocol():
+    with pytest.raises(HKDFError):
+        HKDFContext("", INITIATOR)
+
+
+def test_structured_context_rejects_curve_mismatch():
+    initiator, responder = _ecdh_pair(NIST256p, 0x42424242)
+    foreign = SigningKey.generate(NIST384p).get_verifying_key()
+
+    context = HKDFContext("proto", INITIATOR)
+    with pytest.raises(InvalidCurveError):
+        context.to_info(
+            curve=NIST256p,
+            initiator_public_key=foreign,
+            responder_public_key=responder.get_public_key(),
+        )
+
+
+def test_structured_context_rejects_illegal_raw_length():
+    initiator, responder = _ecdh_pair(NIST256p, 0x42424242)
+    context = HKDFContext("proto", INITIATOR)
+    with pytest.raises(HKDFError):
+        context.to_info(
+            curve=NIST256p,
+            initiator_public_key=initiator.get_public_key(),
+            responder_public_key=responder.get_public_key().to_string()[
+                :30
+            ],
+        )
+    with pytest.raises(HKDFError):
+        context.to_info(
+            curve=NIST256p,
+            initiator_public_key=initiator.get_public_key().to_string(
+                "raw"
+            ),
+            responder_public_key=responder.get_public_key(),
+        )
+
+
+def test_generate_session_key_requires_info_or_context():
+    ecdh = ECDH(curve=NIST256p)
+    ecdh.generate_private_key()
+    ecdh.load_received_public_key(
+        SigningKey.generate(NIST256p).get_verifying_key()
+    )
+
+    with pytest.raises(HKDFError):
+        ecdh.generate_session_key(32)
+    with pytest.raises(HKDFError):
+        ecdh.generate_session_key(
+            32, info=b"info", context=HKDFContext("p", INITIATOR)
+        )
+
+
+def test_generate_session_key_rejects_curve_mismatch():
+    ecdh = ECDH(curve=NIST256p)
+    ecdh.generate_private_key()
+    # bypass load_received_public_key checks, same as existing tests
+    ecdh.public_key = SigningKey.generate(NIST384p).get_verifying_key()
+
+    with pytest.raises(InvalidCurveError):
+        ecdh.generate_session_key(32, info=b"info")
+    with pytest.raises(InvalidCurveError):
+        ecdh.generate_session_key(32, context=HKDFContext("p", INITIATOR))
+
+
+def test_generate_session_key_rejects_infinity_secret():
+    ecdh = ECDH(curve=NIST256p)
+    ecdh.generate_private_key()
+    ecdh.load_received_public_key(
+        SigningKey.generate(NIST256p).get_verifying_key()
+    )
+    ecdh.private_key.privkey.secret_multiplier = ecdh.private_key.curve.order
+
+    with pytest.raises(InvalidSharedSecretError):
+        ecdh.generate_session_key(32, info=b"info")
+
+
+def test_error_messages_do_not_leak_secrets():
+    private_scalar = 0x5A5A5A5A
+    private_bytes = unhexlify("%064x" % private_scalar)
+    ecdh = ECDH(curve=NIST256p)
+    ecdh.load_private_key_bytes(private_bytes)
+    ecdh.load_received_public_key(
+        SigningKey.generate(NIST256p).get_verifying_key()
+    )
+
+    for call in (
+        lambda: ecdh.generate_session_key(0, info=b"info"),
+        lambda: ecdh.generate_session_key(-3, info=b"info"),
+    ):
+        try:
+            call()
+        except HKDFError as error:
+            message = str(error)
+        else:  # pragma: no cover
+            pytest.fail("HKDFError not raised")
+        assert private_bytes.hex() not in message
+        assert "5a5a5a5a" not in message

@@ -1,3 +1,17 @@
+* Unreleased
+
+New API:
+* Added explicit HKDF (RFC 5869) key derivation: ``ECDH.generate_session_key()``
+  derives a session key directly from the fixed width ECDH shared secret,
+  accepting a hash name/callable, salt, info and output length.
+* Added ``HKDFContext`` for an unambiguous structured ``info`` that binds the
+  derived key to a protocol name, the initiator/responder role order and the
+  canonical (uncompressed SEC1) encodings of both public keys. Fields are
+  length prefixed (no length-less concatenation) and public keys are never
+  sorted, so initiator and responder can't be confused.
+* Added ``ecdsa.hkdf`` module with ``hkdf()``, ``hkdf_extract()`` and
+  ``hkdf_expand()`` functions, implemented with the standard library only.
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:

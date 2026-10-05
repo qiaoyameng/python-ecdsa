@@ -38,11 +38,15 @@ from .curves import (
 )
 from .ecdh import (
     ECDH,
+    HKDFContext,
+    INITIATOR,
+    RESPONDER,
     NoKeyError,
     NoCurveError,
     InvalidCurveError,
     InvalidSharedSecretError,
 )
+from .hkdf import hkdf, hkdf_extract, hkdf_expand, HKDFError
 from .der import UnexpectedDER
 from . import _version
 
@@ -70,6 +74,13 @@ _hush_pyflakes = [
     NoKeyError,
     InvalidSharedSecretError,
     ECDH,
+    HKDFContext,
+    INITIATOR,
+    RESPONDER,
+    hkdf,
+    hkdf_extract,
+    hkdf_expand,
+    HKDFError,
     NoCurveError,
     NIST192p,
     NIST224p,
