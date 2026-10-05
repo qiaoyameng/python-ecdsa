@@ -1,3 +1,14 @@
+* Unreleased
+
+New API:
+* ``ecdsa.batch.verify_digests`` for batch verification of ECDSA
+  signatures against message digests. It returns one result per input
+  item (``valid``, ``invalid_signature`` or ``invalid_parameter``),
+  supports mixed short Weierstrass curves, digests and raw/DER signature
+  encodings, and reuses a bounded, per-call or caller-provided
+  precomputation cache (``ecdsa.batch.VerificationCache``) for repeated
+  public keys, including different encodings of the same key.
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:

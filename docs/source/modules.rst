@@ -5,3 +5,4 @@ python-ecdsa API
    :maxdepth: 4
 
    ecdsa
+   ecdsa.batch

@@ -36,6 +36,16 @@ from .curves import (
     BRAINPOOLP384t1,
     BRAINPOOLP512t1,
 )
+from .batch import (
+    verify_digests,
+    BatchItem,
+    BatchVerifyResult,
+    VerificationCache,
+    VALID,
+    INVALID_SIGNATURE,
+    INVALID_PARAMETER,
+    DEFAULT_MAX_KEYS,
+)
 from .ecdh import (
     ECDH,
     NoKeyError,
@@ -57,6 +67,15 @@ __all__ = [
     "test_pyecdsa",
     "util",
     "six",
+    "batch",
+    "verify_digests",
+    "BatchItem",
+    "BatchVerifyResult",
+    "VerificationCache",
+    "VALID",
+    "INVALID_SIGNATURE",
+    "INVALID_PARAMETER",
+    "DEFAULT_MAX_KEYS",
 ]
 
 _hush_pyflakes = [
@@ -91,6 +110,14 @@ _hush_pyflakes = [
     Ed25519,
     Ed448,
     six.b(""),
+    verify_digests,
+    BatchItem,
+    BatchVerifyResult,
+    VerificationCache,
+    VALID,
+    INVALID_SIGNATURE,
+    INVALID_PARAMETER,
+    DEFAULT_MAX_KEYS,
     BRAINPOOLP160t1,
     BRAINPOOLP192t1,
     BRAINPOOLP224t1,
