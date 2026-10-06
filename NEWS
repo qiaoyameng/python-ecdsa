@@ -1,5 +1,13 @@
 * Release 0.19.2 (26 Mar 2026)
 
+New API:
+* Added ``ecdsa.bip32`` implementing BIP 32 hierarchical deterministic key
+  derivation for secp256k1. It provides ``master_key_from_seed``,
+  ``ExtendedKey`` (with hardened/non-hardened child derivation and public
+  neutering), ``parse_path``, and Base58Check (de)serialisation of
+  xprv/xpub/tprv/tpub extended keys. Paths are parsed with a dedicated
+  parser and never evaluated as Python expressions.
+
 Bug fixes:
 * Fix CVE-2026-33936, a DER parsing issue in ``remove_octet_string()``,
   ``remove_constructed()``, and ``remove_implitic()`` where a truncated buffer

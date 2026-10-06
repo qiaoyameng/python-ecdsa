@@ -102,3 +102,26 @@ _hush_pyflakes = [
 del _hush_pyflakes
 
 __version__ = _version.get_versions()["version"]
+
+# BIP 32 hierarchical deterministic key derivation (independent module).
+from .bip32 import (
+    HARDENED_INDEX,
+    MAX_INDEX,
+    MAINNET_PRIVATE,
+    MAINNET_PUBLIC,
+    TESTNET_PRIVATE,
+    TESTNET_PUBLIC,
+    BIP32Error,
+    InvalidSeedError,
+    InvalidPathError,
+    InvalidExtendedKeyError,
+    HardPublicDerivationError,
+    ExtendedKey,
+    parse_path,
+    master_key_from_seed,
+    base58_encode,
+    base58_decode,
+    base58check_encode,
+    base58check_decode,
+    hash160,
+)
