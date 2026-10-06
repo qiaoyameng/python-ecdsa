@@ -12,6 +12,7 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   ecdsa.bip32
    ecdsa.curves
    ecdsa.der
    ecdsa.ecdh
